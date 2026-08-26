@@ -40,7 +40,7 @@ jobs:
       - run: pnpm test:coverage
       - run: pnpm test:browser:compat
       - name: Add coverage summary
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && hashFiles('coverage/coverage-summary.json') != '' }}
         run: pnpm coverage:summary >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage report
         if: always()

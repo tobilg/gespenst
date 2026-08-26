@@ -18,7 +18,16 @@
       "@gespenst/clipboard": ["./packages/clipboard/src/index.ts"],
       "@gespenst/core": ["./packages/core/src/index.ts"],
       "@gespenst/core/headless": ["./packages/core/src/core/index.ts"],
+      "@gespenst/react": ["./packages/react/src/index.ts"],
+      "@gespenst/search": ["./packages/search/src/index.ts"],
+      "@gespenst/serialize": ["./packages/serialize/src/index.ts"],
+      "@gespenst/svelte": ["./packages/svelte/src/index.ts"],
       "@gespenst/themes": ["./packages/themes/src/index.ts"],
+      "@gespenst/vue": ["./packages/vue/src/index.ts"],
+      "@gespenst/wasmer": ["./packages/wasmer/src/index.ts"],
+      "@gespenst/web-fonts": ["./packages/web-fonts/src/index.ts"],
+      "@gespenst/web-links": ["./packages/web-links/src/index.ts"],
+      "@gespenst/websocket": ["./packages/websocket/src/index.ts"],
       "@gespenst/xterm": ["./packages/xterm/src/index.ts"]
     },
     "noEmit": true
