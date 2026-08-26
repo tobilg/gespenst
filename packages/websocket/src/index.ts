@@ -8,6 +8,11 @@ import type {
 /** Default WebSocket subprotocol used by the addon and example PTY server. */
 export const WEBSOCKET_PROTOCOL = 'gespenst.v1';
 
+// WebSocket ready-state values are fixed by the WebSocket standard. Keep transport checks
+// independent of the ambient constructor so custom sockets also work in Node and test runtimes.
+const SOCKET_OPEN = 1;
+const SOCKET_CLOSING = 2;
+
 /** Observable lifecycle states for a {@link WebSocketAddon}. */
 export type WebSocketAddonStatus =
   | 'idle'
@@ -163,7 +168,7 @@ export class WebSocketAddon implements TerminalAddon {
       this.connection = connection;
       this.resizeListener?.dispose();
       this.resizeListener = terminal.on('resize', ({ cols, rows }) => {
-        if (activeSocket.readyState === WebSocket.OPEN)
+        if (activeSocket.readyState === SOCKET_OPEN)
           activeSocket.send(JSON.stringify({ type: 'resize', cols, rows }));
       });
       this.setStatus('connected');
@@ -229,7 +234,7 @@ export function socketTransport(socket: WebSocket): SocketTransport {
   let removeReadableListeners = () => {};
   let cancelReadable = (reason: unknown) => {
     removeReadableListeners();
-    if (socket.readyState < WebSocket.CLOSING)
+    if (socket.readyState < SOCKET_CLOSING)
       socket.close(1000, typeof reason === 'string' ? reason : 'Terminal closed');
   };
   const readable = new ReadableStream<Uint8Array>({
@@ -261,7 +266,7 @@ export function socketTransport(socket: WebSocket): SocketTransport {
               }
               if (control.type === 'error') throw new Error(control.message ?? 'PTY error');
               if (control.type === 'exit') {
-                if (socket.readyState < WebSocket.CLOSING) socket.close(1000, 'PTY exited');
+                if (socket.readyState < SOCKET_CLOSING) socket.close(1000, 'PTY exited');
                 finish(() => controller.close());
               }
             }
@@ -285,7 +290,7 @@ export function socketTransport(socket: WebSocket): SocketTransport {
         if (settled) return;
         settled = true;
         removeReadableListeners();
-        if (socket.readyState < WebSocket.CLOSING)
+        if (socket.readyState < SOCKET_CLOSING)
           socket.close(1000, typeof reason === 'string' ? reason : 'Terminal closed');
       };
       socket.addEventListener('message', message);
@@ -298,18 +303,18 @@ export function socketTransport(socket: WebSocket): SocketTransport {
   });
   const writable = new WritableStream<Uint8Array>({
     async write(data) {
-      if (socket.readyState !== WebSocket.OPEN) throw new Error('WebSocket is not open');
+      if (socket.readyState !== SOCKET_OPEN) throw new Error('WebSocket is not open');
       while (socket.bufferedAmount > 1024 * 1024) {
-        if (socket.readyState !== WebSocket.OPEN) throw new Error('WebSocket closed while writing');
+        if (socket.readyState !== SOCKET_OPEN) throw new Error('WebSocket closed while writing');
         await new Promise((resolve) => setTimeout(resolve, 4));
       }
       socket.send(data.slice().buffer);
     },
     close() {
-      if (socket.readyState < WebSocket.CLOSING) socket.close(1000, 'Terminal input closed');
+      if (socket.readyState < SOCKET_CLOSING) socket.close(1000, 'Terminal input closed');
     },
     abort(reason) {
-      if (socket.readyState < WebSocket.CLOSING)
+      if (socket.readyState < SOCKET_CLOSING)
         socket.close(1011, typeof reason === 'string' ? reason : 'Terminal input failed');
     },
   });
@@ -317,7 +322,7 @@ export function socketTransport(socket: WebSocket): SocketTransport {
 }
 
 function waitForOpen(socket: WebSocket): Promise<void> {
-  if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
+  if (socket.readyState === SOCKET_OPEN) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const cleanup = () => {
       socket.removeEventListener('open', open);

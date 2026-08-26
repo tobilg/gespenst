@@ -194,6 +194,7 @@ describe('@gespenst/websocket', () => {
   });
 
   it('handles writable sends, backpressure closure, close, abort, and readable cancellation', async () => {
+    vi.stubGlobal('WebSocket', undefined);
     vi.useFakeTimers();
     const socket = new FakeSocket();
     socket.readyState = FakeSocket.OPEN;
