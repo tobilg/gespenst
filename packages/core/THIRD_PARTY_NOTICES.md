@@ -1,6 +1,15 @@
+# Third-party notices
+
+## Ghostty
+
+`ghostty-vt.wasm` is built by the [Ghostty project](https://github.com/ghostty-org/ghostty)
+and redistributed under the following MIT License. This text is reproduced from Ghostty's
+[`LICENSE`](https://github.com/ghostty-org/ghostty/blob/main/LICENSE) file.
+
+```text
 MIT License
 
-Copyright (c) 2026 TobiLG <github@tobilg.com>
+Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +28,4 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```

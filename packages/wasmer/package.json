@@ -1,0 +1,42 @@
+{
+  "name": "@gespenst/wasmer",
+  "version": "0.1.0",
+  "description": "Browser-only Wasmer WASIX shell transport for gespenst",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tobilg/gespenst.git",
+    "directory": "packages/wasmer"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@gespenst/core": "^0.1.0",
+    "@wasmer/sdk": "^0.10.0"
+  },
+  "devDependencies": {
+    "@gespenst/core": "workspace:*",
+    "@wasmer/sdk": "0.10.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

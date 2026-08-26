@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>gespenst demo</title>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #111315; }
+      body { margin: 0; display: grid; min-height: 100vh; place-items: center; }
+      main { width: min(1100px, calc(100vw - 32px)); }
+      h1 { margin: 0 0 12px; font-size: 18px; font-weight: 600; color: #e8e8e8; }
+      #terminal { height: min(680px, calc(100vh - 96px)); border: 1px solid #34383c; border-radius: 8px; overflow: hidden; box-shadow: 0 24px 70px #0008; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>@gespenst/core</h1>
+      <div id="terminal"></div>
+    </main>
+    <script type="module" src="/demo/main.ts"></script>
+  </body>
+</html>

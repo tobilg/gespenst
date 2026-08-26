@@ -1,0 +1,13 @@
+{
+  "name": "@gespenst/typedoc-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "typedoc --options ../../typedoc.json && node postprocess.mjs"
+  },
+  "devDependencies": {
+    "typedoc": "0.28.20",
+    "typescript": "5.9.3"
+  }
+}

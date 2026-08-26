@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+    />
+    <!-- The page pins the landing palette's light surface in every theme. -->
+    <meta name="theme-color" content="#f2f0ea" />
+    <link rel="canonical" href="%SITE_URL%/example.html" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="gespenst" />
+    <meta property="og:url" content="%SITE_URL%/" />
+    <meta property="og:title" content="gespenst — Ghostty VT for the web" />
+    <meta
+      property="og:description"
+      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+    />
+    <meta property="og:image" content="%SITE_URL%/opengraph.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="The gespenst terminal toolkit: Ghostty VT running in the browser." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="gespenst — Ghostty VT for the web" />
+    <meta
+      name="twitter:description"
+      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+    />
+    <meta name="twitter:image" content="%SITE_URL%/opengraph.png" />
+    <meta name="twitter:image:alt" content="The gespenst terminal toolkit: Ghostty VT running in the browser." />
+    <script>
+      window.coi = { quiet: true };
+    </script>
+    <script src="%BASE_URL%coi-serviceworker.min.js"></script>
+    <title>gespenst — Transparent terminal example</title>
+  </head>
+  <body class="example-page">
+    <a class="skip-link" href="#top">Skip to content</a>
+
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="wordmark" href="%BASE_URL%index.html#top">gespenst</a>
+        <nav aria-label="Primary navigation">
+          <a href="%BASE_URL%index.html#install">Install</a>
+          <a href="%BASE_URL%index.html#packages">Packages</a>
+          <a href="%BASE_URL%index.html#architecture">Architecture</a>
+          <a href="%BASE_URL%index.html#guides">Guides</a>
+          <a class="nav-current" aria-current="page" href="%BASE_URL%example.html">Example</a>
+          <a href="%BASE_URL%api/index.html">API</a>
+          <a class="nav-external" href="https://github.com/tobilg/gespenst">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top" class="example-main">
+      <div class="example-grid" aria-hidden="true"></div>
+
+      <section class="example-copy">
+        <p class="eyebrow">Example</p>
+        <h1>A highly customizable terminal</h1>
+        <p class="example-lede">
+          This is one real WASIX Bash session rendering black text on a nearly transparent surface,
+          so the grid behind it stays visible straight through the cells. Drag it by its title bar.
+          It is deliberately fixed in size.
+        </p>
+
+        <dl class="example-facts">
+          <div>
+            <dt>Surface</dt>
+            <dd>
+              <code>allowTransparency: true</code> switches the WebGPU, WebGL2, and Canvas 2D
+              surfaces to an alpha-capable context. It is init-only, because it changes how the
+              rendering context is created.
+            </dd>
+          </div>
+          <div>
+            <dt>Theme</dt>
+            <dd>
+              The background carries the alpha and the foreground stays opaque black. Without
+              <code>allowTransparency</code>, an alpha color is rejected at creation rather than
+              silently rendered opaque.
+            </dd>
+          </div>
+          <div>
+            <dt>Dragging</dt>
+            <dd>
+              The title bar moves the window with a CSS transform, which never changes the
+              element's size, so the grid is not remeasured while it travels.
+            </dd>
+          </div>
+        </dl>
+
+        <pre><code><span class="code-muted">const</span> terminal = <span class="code-accent">await</span> createTerminal({
+  container,
+  allowTransparency: <span class="code-accent">true</span>,
+  theme: {
+    background: 'rgba(250, 248, 242, 0.06)',
+    foreground: '#262722',
+  },
+});</code></pre>
+
+        <a class="architecture-link" href="%BASE_URL%api/documents/Core_Guide.Theming.html"
+          >Read the theming guide</a
+        >
+      </section>
+
+      <div
+        class="glass-window"
+        id="glass-window"
+        role="group"
+        aria-label="Draggable transparent terminal"
+      >
+        <div class="glass-titlebar" id="glass-titlebar">
+          <span class="glass-title">bash — transparent</span>
+          <span class="glass-status" id="renderer-status" role="status">Checking browser runtime</span>
+        </div>
+        <div id="terminal" class="glass-terminal" aria-label="Transparent Gespenst terminal"></div>
+        <div id="terminal-error" class="terminal-error" hidden></div>
+      </div>
+    </main>
+
+    <script type="module" src="/src/example.ts"></script>
+  </body>
+</html>

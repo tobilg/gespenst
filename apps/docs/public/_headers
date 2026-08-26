@@ -1,0 +1,15 @@
+# Cloudflare Pages reads this file from the deployment root.
+#
+# The live demo runs a WASIX shell, which needs SharedArrayBuffer and therefore a cross-origin
+# isolated page. The bundled coi-serviceworker is only a fallback for hosts that cannot send these
+# headers; serving them directly avoids its reload on first visit. Keep them in step with the
+# `server` and `preview` headers in apps/docs/vite.config.ts.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+# Vite fingerprints these filenames, so a given URL can never change contents.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

@@ -1,0 +1,98 @@
+:root {
+  --color-background: #f2f0ea;
+  --color-background-secondary: #e8e5dd;
+  --color-accent: #a85f22;
+  --color-link: #8b4b16;
+  --color-active-menu-item: #ead9c7;
+  --code-background: #e2dfd6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background: #181a17;
+    --color-background-secondary: #20231f;
+    --color-accent: #d08a3f;
+    --color-link: #e0a15c;
+    --color-active-menu-item: #3b2d20;
+    --code-background: #292d27;
+  }
+}
+
+.site-menu .tsd-navigation a,
+.tsd-page-toolbar a.title {
+  letter-spacing: -0.01em;
+}
+
+.tsd-page-title h1 {
+  letter-spacing: -0.035em;
+}
+
+.col-content {
+  min-width: 0;
+}
+
+.tsd-typography {
+  font-size: 1rem;
+  line-height: 1.7;
+}
+
+.tsd-typography > p,
+.tsd-typography > ul,
+.tsd-typography > ol,
+.tsd-typography > blockquote {
+  max-width: 74ch;
+}
+
+.tsd-typography h2 {
+  margin-top: 2.5em;
+  letter-spacing: -0.025em;
+}
+
+.tsd-typography h3 {
+  margin-top: 2em;
+  letter-spacing: -0.015em;
+}
+
+.tsd-typography blockquote {
+  margin-inline: 0;
+  padding: 0.15rem 1.1rem;
+  border-left: 3px solid var(--color-accent);
+  background: var(--color-background-secondary);
+}
+
+.tsd-typography pre {
+  max-width: 100%;
+  border: 1px solid var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 28%, transparent);
+  border-radius: 10px;
+  overflow-x: auto;
+}
+
+.tsd-typography :not(pre) > code {
+  border-radius: 4px;
+}
+
+.tsd-typography table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: normal;
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 3px;
+}
+
+@media (max-width: 769px) {
+  .tsd-typography {
+    font-size: 0.96rem;
+    line-height: 1.65;
+  }
+
+  .tsd-typography pre {
+    border-radius: 8px;
+  }
+}

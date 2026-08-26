@@ -1,0 +1,19 @@
+{
+  "source": "https://github.com/ghostty-org/ghostty/releases/download/tip/ghostty-vt.wasm",
+  "resolvedUrl": "https://release-assets.githubusercontent.com/github-production-release-asset/475553026/421e136c-3c4b-4685-b69c-3dee4b2bbbea",
+  "fetchedAt": "2026-08-25T16:44:31.053Z",
+  "sha256": "b3a643550f2390fb90b541ec9229c65963fb0bdb9af40648059477bfa2cb79f8",
+  "size": 981300,
+  "ghosttyVersion": "0.1.0-dev",
+  "ghosttyCommit": null,
+  "abiSchema": 1,
+  "abi": {
+    "target": "wasm32",
+    "os": "freestanding",
+    "environment": "none",
+    "pointer_size": 4,
+    "usize_size": 4,
+    "max_alignment": 16,
+    "endian": "little"
+  }
+}

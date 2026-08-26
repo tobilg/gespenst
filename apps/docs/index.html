@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+    />
+    <meta name="theme-color" content="#f2f0ea" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#181a17" media="(prefers-color-scheme: dark)" />
+    <link rel="canonical" href="%SITE_URL%/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="gespenst" />
+    <meta property="og:url" content="%SITE_URL%/" />
+    <meta property="og:title" content="gespenst — Ghostty VT for the web" />
+    <meta
+      property="og:description"
+      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+    />
+    <meta property="og:image" content="%SITE_URL%/opengraph.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="The gespenst terminal toolkit: Ghostty VT running in the browser." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="gespenst — Ghostty VT for the web" />
+    <meta
+      name="twitter:description"
+      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+    />
+    <meta name="twitter:image" content="%SITE_URL%/opengraph.png" />
+    <meta name="twitter:image:alt" content="The gespenst terminal toolkit: Ghostty VT running in the browser." />
+    <script>
+      window.coi = { quiet: true };
+    </script>
+    <script src="%BASE_URL%coi-serviceworker.min.js"></script>
+    <title>gespenst — Ghostty VT for the web</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#top">Skip to content</a>
+
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="wordmark" href="%BASE_URL%index.html#top">gespenst</a>
+        <nav aria-label="Primary navigation">
+          <a href="%BASE_URL%index.html#install">Install</a>
+          <a href="%BASE_URL%index.html#packages">Packages</a>
+          <a href="%BASE_URL%index.html#architecture">Architecture</a>
+          <a href="%BASE_URL%index.html#guides">Guides</a>
+          <a href="%BASE_URL%example.html">Example</a>
+          <a href="%BASE_URL%api/index.html">API</a>
+          <a class="nav-external" href="https://github.com/tobilg/gespenst">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Ghostty VT for the web</p>
+          <h1 id="hero-title">A real Ghostty terminal, running in the browser.</h1>
+          <p class="hero-summary">
+            Gespenst drives the official Ghostty VT engine from TypeScript: unmodified WASM parsing,
+            worker isolation, byte-native streams, and much more.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="%BASE_URL%index.html#install">Get started</a>
+            <a class="button button-secondary" href="%BASE_URL%api/index.html">Explore the API</a>
+          </div>
+          <p class="hero-meta">
+            <span>MIT licensed</span><span>ESM only</span>
+          </p>
+        </div>
+        <div class="hero-demo">
+          <div class="terminal-stage">
+            <div class="terminal-toolbar">
+              <span id="renderer-status" role="status">Checking browser runtime</span>
+              <div class="terminal-controls">
+                <label for="theme-select">Theme</label>
+                <select id="theme-select"></select>
+                <button id="reset-demo" type="button">Clear display</button>
+              </div>
+            </div>
+            <div id="terminal" aria-label="Interactive Gespenst terminal demo"></div>
+            <div id="terminal-error" class="terminal-error" hidden></div>
+          </div>
+          <p class="demo-hint">
+            A real Bash process compiled to WASIX, with coreutils on its PATH, running in this tab
+            with no backend.
+          </p>
+        </div>
+      </section>
+
+      <section class="capability-strip" aria-label="Core capabilities">
+        <div>
+          <strong>Official Ghostty core</strong>
+          <span>The unmodified nightly <code>ghostty-vt.wasm</code>, checksummed and ABI-verified
+            before a terminal is created.</span>
+        </div>
+        <div>
+          <strong>Off the main thread</strong>
+          <span>Parsing and rendering run in a dedicated worker by default, with shared-worker and
+            main-thread fallbacks.</span>
+        </div>
+        <div>
+          <strong>Bytes end to end</strong>
+          <span>PTY output stays <code>Uint8Array</code> from the socket to Ghostty. Nothing is
+            decoded to strings on the way.</span>
+        </div>
+        <div>
+          <strong>Shells without a server</strong>
+          <span>WASIX packages run in the page, so a working shell needs no PTY host and no
+            deployment.</span>
+        </div>
+      </section>
+
+      <section id="install" class="install-section" aria-labelledby="install-title">
+        <div class="install-copy">
+          <h2 id="install-title">Start with the native API.</h2>
+          <p>
+            Keep PTY bytes intact from the socket to Ghostty. Framework adapters wrap the same
+            terminal, and compatibility is added only where an existing integration needs it.
+          </p>
+          <a class="architecture-link" href="%BASE_URL%api/documents/Core_Guide.Getting_Started.html"
+            >Read the getting-started guide</a
+          >
+        </div>
+
+        <div class="tabs">
+          <input class="tab-input" type="radio" name="quickstart" id="quickstart-ts" checked />
+          <input class="tab-input" type="radio" name="quickstart" id="quickstart-react" />
+          <input class="tab-input" type="radio" name="quickstart" id="quickstart-vue" />
+          <input class="tab-input" type="radio" name="quickstart" id="quickstart-svelte" />
+
+          <div class="tab-list">
+            <label for="quickstart-ts">TypeScript</label>
+            <label for="quickstart-react">React</label>
+            <label for="quickstart-vue">Vue</label>
+            <label for="quickstart-svelte">Svelte</label>
+          </div>
+
+          <div class="tab-panels">
+            <div class="tab-panel" data-panel="ts">
+              <pre><code>pnpm add @gespenst/core</code></pre>
+              <pre><code><span class="code-muted">import</span> { createTerminal } <span class="code-muted">from</span> '@gespenst/core';
+<span class="code-muted">import</span> '@gespenst/core/style.css';
+
+<span class="code-muted">const</span> terminal = <span class="code-accent">await</span> createTerminal({
+  container: document.querySelector('#terminal'),
+  worker: 'dedicated',
+});</code></pre>
+            </div>
+
+            <div class="tab-panel" data-panel="react">
+              <pre><code>pnpm add @gespenst/core @gespenst/react</code></pre>
+              <pre><code><span class="code-muted">import</span> { GespenstTerminal } <span class="code-muted">from</span> '@gespenst/react';
+<span class="code-muted">import</span> '@gespenst/core/style.css';
+
+<span class="code-muted">export function</span> Shell() {
+  <span class="code-muted">return</span> &lt;<span class="code-accent">GespenstTerminal</span> onReady={(terminal) =&gt; terminal.focus()} /&gt;;
+}</code></pre>
+            </div>
+
+            <div class="tab-panel" data-panel="vue">
+              <pre><code>pnpm add @gespenst/core @gespenst/vue</code></pre>
+              <pre><code>&lt;<span class="code-accent">script setup</span> lang="ts"&gt;
+<span class="code-muted">import</span> { GespenstTerminal } <span class="code-muted">from</span> '@gespenst/vue';
+<span class="code-muted">import</span> '@gespenst/core/style.css';
+&lt;/<span class="code-accent">script</span>&gt;
+
+&lt;<span class="code-accent">template</span>&gt;&lt;GespenstTerminal @ready="terminal =&gt; terminal.focus()" /&gt;&lt;/<span class="code-accent">template</span>&gt;</code></pre>
+            </div>
+
+            <div class="tab-panel" data-panel="svelte">
+              <pre><code>pnpm add @gespenst/core @gespenst/svelte</code></pre>
+              <pre><code>&lt;<span class="code-accent">script</span> lang="ts"&gt;
+  <span class="code-muted">import</span> { gespenstTerminal } <span class="code-muted">from</span> '@gespenst/svelte';
+  <span class="code-muted">import</span> '@gespenst/core/style.css';
+&lt;/<span class="code-accent">script</span>&gt;
+
+&lt;div use:gespenstTerminal={{ onReady: (terminal) =&gt; terminal.focus() }} /&gt;</code></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="architecture" class="architecture" aria-labelledby="architecture-title">
+        <header class="architecture-header">
+          <h2 id="architecture-title">Know what runs where.</h2>
+          <p>
+            Gespenst separates process transport, VT state, and rendering. Choose each boundary
+            independently without translating terminal output or adopting a prescribed backend.
+          </p>
+        </header>
+
+        <figure class="architecture-flow">
+          <div class="architecture-flow-track">
+            <div class="flow-node">
+              <span class="flow-label">Process</span>
+              <h3>PTY or WASIX</h3>
+              <p>Run a server shell or a browser-only package.</p>
+              <code>node-pty | @gespenst/wasmer</code>
+            </div>
+            <div class="flow-node">
+              <span class="flow-label">Transport</span>
+              <h3>Native byte streams</h3>
+              <p>Preserve PTY output and input as binary data.</p>
+              <code>ReadableStream&lt;Uint8Array&gt;</code>
+            </div>
+            <div class="flow-node">
+              <span class="flow-label">Runtime</span>
+              <h3>Ghostty VT state</h3>
+              <p>Parse modes, replies, scrollback, selection, and snapshots.</p>
+              <code>worker: 'dedicated'</code>
+            </div>
+            <div class="flow-node">
+              <span class="flow-label">Surface</span>
+              <h3>Browser renderer</h3>
+              <p>Paint retained frames and collect browser input.</p>
+              <code>WebGPU | WebGL2 | Canvas 2D</code>
+            </div>
+          </div>
+          <figcaption>
+            Output moves from the process to the renderer. Keyboard, paste, pointer, terminal
+            replies, and resize events return through the same byte-oriented boundary.
+          </figcaption>
+        </figure>
+
+        <div class="architecture-decisions">
+          <article class="execution-guide" aria-labelledby="execution-title">
+            <header>
+              <h3 id="execution-title">Pick execution by terminal count.</h3>
+              <p>
+                The default selects a dedicated worker when the browser supports it and falls back
+                safely.
+              </p>
+            </header>
+            <dl class="mode-list">
+              <div>
+                <dt><code>'dedicated'</code><span>Recommended</span></dt>
+                <dd>
+                  One isolated worker per terminal. Use this for most applications and single-session
+                  views.
+                </dd>
+              </div>
+              <div>
+                <dt><code>'shared'</code><span>Many sessions</span></dt>
+                <dd>
+                  Multiplex terminals through one worker when worker count matters. Busy sessions
+                  share its event loop.
+                </dd>
+              </div>
+              <div>
+                <dt><code>false</code><span>Main thread</span></dt>
+                <dd>
+                  Useful for tests, constrained embeds, and unsupported environments. Parsing
+                  competes with application work.
+                </dd>
+              </div>
+            </dl>
+            <a
+              class="architecture-link"
+              href="%BASE_URL%api/documents/Core_Guide.Configuration.html"
+              >Compare configuration tradeoffs</a
+            >
+          </article>
+
+          <article class="integration-guide" aria-labelledby="integration-title">
+            <header>
+              <h3 id="integration-title">Start from your runtime.</h3>
+              <p>
+                The rendering API stays the same. Add only the package that matches where the
+                process lives.
+              </p>
+            </header>
+            <div class="integration-list">
+              <a href="%BASE_URL%api/documents/Core_Guide.Connecting_a_PTY.html">
+                <span
+                  ><strong>Remote shell</strong
+                  ><small>Server PTY, authentication, and reconnect</small></span
+                >
+                <code>@gespenst/websocket</code>
+              </a>
+              <a href="%BASE_URL%api/modules/_gespenst_wasmer.index.html">
+                <span
+                  ><strong>Browser-only shell</strong
+                  ><small>WASIX process and virtual filesystem</small></span
+                >
+                <code>@gespenst/wasmer</code>
+              </a>
+              <a href="%BASE_URL%api/documents/Core_Guide.Migrating_from_xterm.js.html">
+                <span
+                  ><strong>Existing xterm integration</strong
+                  ><small>Stable xterm.js API over the native core</small></span
+                >
+                <code>@gespenst/xterm</code>
+              </a>
+              <a href="%BASE_URL%api/documents/Core_Guide.Headless_Runtime.html">
+                <span
+                  ><strong>No browser UI</strong
+                  ><small>Parsing, automation, testing, and snapshots</small></span
+                >
+                <code>@gespenst/core/headless</code>
+              </a>
+            </div>
+          </article>
+        </div>
+
+        <aside class="architecture-contract" aria-labelledby="contract-title">
+          <div class="contract-intro">
+            <h3 id="contract-title">The integration contract</h3>
+            <p>
+              Terminals are a security boundary. Gespenst draws the line in one place so escape
+              sequences never turn into browser actions on their own.
+            </p>
+          </div>
+          <div class="contract-split">
+            <div class="contract-card">
+              <strong>Gespenst owns</strong>
+              <p>VT parsing, terminal state, input encoding, and rendering.</p>
+            </div>
+            <div class="contract-card">
+              <strong>Your application owns</strong>
+              <p>
+                Process lifecycle, authentication, authorization, transport policy, and clipboard
+                permission.
+              </p>
+            </div>
+          </div>
+          <a
+            class="architecture-link"
+            href="%BASE_URL%api/documents/Core_Guide.Events,_Permissions,_and_Lifecycle.html"
+            >Review events and security boundaries</a
+          >
+        </aside>
+      </section>
+
+      <section id="packages" class="packages" aria-labelledby="packages-title">
+        <header class="section-header">
+          <h2 id="packages-title">One core, composable parts.</h2>
+          <p>
+            Every package ships as ESM with lockstep versions, so nothing you skip ends up in the
+            bundle. Each entry links to its generated API reference.
+          </p>
+        </header>
+
+        <div class="package-groups">
+          <section class="package-group" aria-labelledby="group-core">
+            <h3 id="group-core">Core</h3>
+            <ul>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_core.index.html">
+                  <code>@gespenst/core</code>
+                  <small>Browser terminal, renderers, addon host</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_core.core.html">
+                  <code>@gespenst/core/headless</code>
+                  <small>Ghostty VT state machine without a DOM</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_themes.index.html">
+                  <code>@gespenst/themes</code>
+                  <small>Curated, tree-shakable light and dark themes</small>
+                </a>
+              </li>
+            </ul>
+          </section>
+
+          <section class="package-group" aria-labelledby="group-transport">
+            <h3 id="group-transport">Processes</h3>
+            <ul>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_websocket.index.html">
+                  <code>@gespenst/websocket</code>
+                  <small>Binary transport, resize protocol, reconnect</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_wasmer.index.html">
+                  <code>@gespenst/wasmer</code>
+                  <small>Browser-only WASIX shells and filesystems</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_xterm.index.html">
+                  <code>@gespenst/xterm</code>
+                  <small>xterm.js 6.0 stable public API compatibility</small>
+                </a>
+              </li>
+            </ul>
+          </section>
+
+          <section class="package-group" aria-labelledby="group-addons">
+            <h3 id="group-addons">Addons</h3>
+            <ul>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_clipboard.index.html">
+                  <code>@gespenst/clipboard</code>
+                  <small>Permission-aware text and MIME paste</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_search.index.html">
+                  <code>@gespenst/search</code>
+                  <small>Buffer search with viewport highlights</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_web-links.index.html">
+                  <code>@gespenst/web-links</code>
+                  <small>Safe HTTP(S) detection and activation</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_web-fonts.index.html">
+                  <code>@gespenst/web-fonts</code>
+                  <small>Document and worker web-font loading</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_serialize.index.html">
+                  <code>@gespenst/serialize</code>
+                  <small>Versioned snapshots with build metadata</small>
+                </a>
+              </li>
+            </ul>
+          </section>
+
+          <section class="package-group" aria-labelledby="group-frameworks">
+            <h3 id="group-frameworks">Frameworks</h3>
+            <ul>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_react.index.html">
+                  <code>@gespenst/react</code>
+                  <small>Component and hook</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_vue.index.html">
+                  <code>@gespenst/vue</code>
+                  <small>Component and composable</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_svelte.index.html">
+                  <code>@gespenst/svelte</code>
+                  <small>Action with runtime font and theme updates</small>
+                </a>
+              </li>
+            </ul>
+          </section>
+        </div>
+      </section>
+
+      <section id="guides" class="guides" aria-labelledby="guides-title">
+        <header class="section-header">
+          <h2 id="guides-title">Guides for the whole path.</h2>
+          <p>
+            The core guide walks from first render to production concerns: transports, configuration,
+            fonts, permissions, performance, and the failure modes worth knowing early.
+          </p>
+        </header>
+
+        <div class="guide-grid">
+          <a class="guide-card" href="%BASE_URL%api/documents/Core_Guide.Getting_Started.html">
+            <strong>Getting Started</strong>
+            <span>Create a responsive terminal with default worker and renderer selection.</span>
+          </a>
+          <a class="guide-card" href="%BASE_URL%api/documents/Core_Guide.Connecting_a_PTY.html">
+            <strong>Connecting a PTY</strong>
+            <span>Wire input and output without imposing a server protocol on the core.</span>
+          </a>
+          <a class="guide-card" href="%BASE_URL%api/documents/Core_Guide.Configuration.html">
+            <strong>Configuration</strong>
+            <span>Choose settings by host application, terminal count, and accessibility.</span>
+          </a>
+          <a
+            class="guide-card"
+            href="%BASE_URL%api/documents/Core_Guide.Layout,_Fonts,_and_Themes.html"
+          >
+            <strong>Layout, Fonts, and Themes</strong>
+            <span>Keep cells aligned by making layout and font loading explicit.</span>
+          </a>
+          <a class="guide-card" href="%BASE_URL%api/documents/Core_Guide.Theming.html">
+            <strong>Theming</strong>
+            <span>Flat, xterm-compatible theme values normalized outside the render loop.</span>
+          </a>
+          <a
+            class="guide-card"
+            href="%BASE_URL%api/documents/Core_Guide.Events,_Permissions,_and_Lifecycle.html"
+          >
+            <strong>Events, Permissions, and Lifecycle</strong>
+            <span>Treat escape-sequence effects as requests, not automatic browser actions.</span>
+          </a>
+          <a class="guide-card" href="%BASE_URL%api/documents/Core_Guide.Performance.html">
+            <strong>Performance</strong>
+            <span>Preserve the byte-native path, then measure under representative output.</span>
+          </a>
+          <a class="guide-card" href="%BASE_URL%api/documents/Core_Guide.Headless_Runtime.html">
+            <strong>Headless Runtime</strong>
+            <span>Parsing, input encoding, events, and snapshots without a DOM.</span>
+          </a>
+          <a
+            class="guide-card"
+            href="%BASE_URL%api/documents/Core_Guide.Migrating_from_xterm.js.html"
+          >
+            <strong>Migrating from xterm.js</strong>
+            <span>Adopt the native API, or keep a compatibility boundary while you move.</span>
+          </a>
+          <a class="guide-card" href="%BASE_URL%api/documents/Core_Guide.Troubleshooting.html">
+            <strong>Troubleshooting</strong>
+            <span>Start at the first visible symptom, then verify each boundary in turn.</span>
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="footer-links">
+        <div>
+          <h2>Documentation</h2>
+          <a href="%BASE_URL%api/documents/Core_Guide.html">Core guide</a>
+          <a href="%BASE_URL%api/index.html">API reference</a>
+          <a href="%BASE_URL%index.html#install">Install</a>
+        </div>
+        <div>
+          <h2>Reference</h2>
+          <a href="%BASE_URL%index.html#packages">Packages</a>
+          <a href="%BASE_URL%index.html#architecture">Architecture</a>
+          <a href="%BASE_URL%example.html">Transparent terminal example</a>
+          <a href="%BASE_URL%api/documents/Core_Guide.Troubleshooting.html">Troubleshooting</a>
+        </div>
+        <div>
+          <h2>Project</h2>
+          <a href="https://github.com/tobilg/gespenst">GitHub</a>
+          <a href="https://github.com/tobilg/gespenst/issues">Issues</a>
+          <a href="https://ghostty.org">Ghostty</a>
+        </div>
+      </div>
+      <div class="footer-baseline">
+        <span>MIT licensed</span>
+      </div>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

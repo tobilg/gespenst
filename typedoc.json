@@ -1,0 +1,106 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "gespenst API",
+  "entryPointStrategy": "packages",
+  "entryPoints": [
+    "packages/core",
+    "packages/clipboard",
+    "packages/themes",
+    "packages/react",
+    "packages/search",
+    "packages/serialize",
+    "packages/svelte",
+    "packages/vue",
+    "packages/wasmer",
+    "packages/web-fonts",
+    "packages/web-links",
+    "packages/websocket",
+    "packages/xterm"
+  ],
+  "out": "apps/docs/public/api",
+  "readme": "docs/api/README.md",
+  "projectDocuments": ["docs/core/index.md"],
+  "customCss": "docs/api/typedoc.css",
+  "includeVersion": true,
+  "highlightLanguages": [
+    "bash",
+    "console",
+    "css",
+    "html",
+    "http",
+    "javascript",
+    "json",
+    "jsonc",
+    "json5",
+    "yaml",
+    "svelte",
+    "tsx",
+    "typescript",
+    "vue"
+  ],
+  "searchInComments": true,
+  "searchInDocuments": true,
+  "useFirstParagraphOfCommentAsSummary": true,
+  "sort": ["documents-first", "kind", "alphabetical"],
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "excludeProtected": true,
+  "externalSymbolLinkMappings": {
+    "typescript": {
+      "Document": "https://developer.mozilla.org/docs/Web/API/Document"
+    }
+  },
+  "navigationLinks": {
+    "Home": "__GESPENST_HOME__",
+    "Core Guide": "__GESPENST_GUIDE__",
+    "GitHub": "https://github.com/tobilg/gespenst"
+  },
+  "packageOptions": {
+    "entryPoints": ["src/index.ts"],
+    "entryPointStrategy": "resolve",
+    "tsconfig": "tsconfig.json",
+    "readme": "README.md",
+    "alwaysCreateEntryPointModule": true,
+    "excludeInternal": true,
+    "excludePrivate": true,
+    "excludeProtected": true,
+    "skipErrorChecking": true,
+    "useTsLinkResolution": true
+  },
+  "validation": {
+    "invalidLink": false,
+    "invalidPath": true,
+    "notExported": true,
+    "rewrittenLink": true,
+    "notDocumented": true
+  },
+  "requiredToBeDocumented": [
+    "Class",
+    "Enum",
+    "EnumMember",
+    "Function",
+    "Interface",
+    "Method",
+    "Property",
+    "Accessor",
+    "TypeAlias",
+    "Variable"
+  ],
+  "packagesRequiringDocumentation": [
+    "@gespenst/core",
+    "@gespenst/clipboard",
+    "@gespenst/themes",
+    "@gespenst/react",
+    "@gespenst/search",
+    "@gespenst/serialize",
+    "@gespenst/svelte",
+    "@gespenst/vue",
+    "@gespenst/wasmer",
+    "@gespenst/web-fonts",
+    "@gespenst/web-links",
+    "@gespenst/websocket",
+    "@gespenst/xterm"
+  ],
+  "treatWarningsAsErrors": true,
+  "treatValidationWarningsAsErrors": true
+}

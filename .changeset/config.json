@@ -1,0 +1,26 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@3.1.1/schema.json",
+  "changelog": "@changesets/changelog-github",
+  "commit": false,
+  "fixed": [
+    [
+      "@gespenst/core",
+      "@gespenst/clipboard",
+      "@gespenst/xterm",
+      "@gespenst/search",
+      "@gespenst/web-links",
+      "@gespenst/websocket",
+      "@gespenst/web-fonts",
+      "@gespenst/serialize",
+      "@gespenst/react",
+      "@gespenst/vue",
+      "@gespenst/svelte",
+      "@gespenst/wasmer",
+      "@gespenst/themes"
+    ]
+  ],
+  "access": "public",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "ignore": []
+}

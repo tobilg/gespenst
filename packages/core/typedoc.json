@@ -1,0 +1,19 @@
+{
+  "name": "@gespenst/core",
+  "entryPoints": ["src/index.ts", "src/core/index.ts"],
+  "entryPointStrategy": "resolve",
+  "tsconfig": "tsconfig.build.json",
+  "readme": "README.md",
+  "alwaysCreateEntryPointModule": true,
+  "intentionallyNotExported": [
+    "AbiBitField",
+    "AbiField",
+    "AbiManifest",
+    "AbiType",
+    "CallbackBridgeExports",
+    "CallbackHost",
+    "GhosttyExports",
+    "TerminalHost"
+  ],
+  "useTsLinkResolution": true
+}

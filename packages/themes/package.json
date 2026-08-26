@@ -1,0 +1,91 @@
+{
+  "name": "@gespenst/themes",
+  "version": "0.1.0",
+  "description": "Curated, tree-shakable themes for Gespenst terminals",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tobilg/gespenst.git",
+    "directory": "packages/themes"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./gespenst-dark": {
+      "types": "./dist/gespenst-dark.d.ts",
+      "import": "./dist/gespenst-dark.js"
+    },
+    "./gespenst-light": {
+      "types": "./dist/gespenst-light.d.ts",
+      "import": "./dist/gespenst-light.js"
+    },
+    "./dracula": {
+      "types": "./dist/dracula.d.ts",
+      "import": "./dist/dracula.js"
+    },
+    "./catppuccin-mocha": {
+      "types": "./dist/catppuccin-mocha.d.ts",
+      "import": "./dist/catppuccin-mocha.js"
+    },
+    "./catppuccin-latte": {
+      "types": "./dist/catppuccin-latte.d.ts",
+      "import": "./dist/catppuccin-latte.js"
+    },
+    "./tokyo-night-storm": {
+      "types": "./dist/tokyo-night-storm.d.ts",
+      "import": "./dist/tokyo-night-storm.js"
+    },
+    "./tokyo-night-day": {
+      "types": "./dist/tokyo-night-day.d.ts",
+      "import": "./dist/tokyo-night-day.js"
+    },
+    "./nord": {
+      "types": "./dist/nord.d.ts",
+      "import": "./dist/nord.js"
+    },
+    "./gruvbox-dark": {
+      "types": "./dist/gruvbox-dark.d.ts",
+      "import": "./dist/gruvbox-dark.js"
+    },
+    "./gruvbox-light": {
+      "types": "./dist/gruvbox-light.d.ts",
+      "import": "./dist/gruvbox-light.js"
+    },
+    "./solarized-dark": {
+      "types": "./dist/solarized-dark.d.ts",
+      "import": "./dist/solarized-dark.js"
+    },
+    "./solarized-light": {
+      "types": "./dist/solarized-light.d.ts",
+      "import": "./dist/solarized-light.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "peerDependencies": {
+    "@gespenst/core": "workspace:^"
+  },
+  "devDependencies": {
+    "@gespenst/core": "workspace:^"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

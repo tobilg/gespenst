@@ -1,0 +1,17 @@
+{
+  "name": "@gespenst/benchmarks",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "bench": "tsx src/throughput.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@gespenst/core": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "4.23.12",
+    "typescript": "catalog:"
+  }
+}

@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Stable tag to validate and package for publication
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify:wasm
+      - run: pnpm security:audit
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm docs:api
+      - run: pnpm bench:throughput
+        env:
+          GESPENST_MIN_MIB_S: 50
+      - run: pnpm exec playwright install --with-deps chromium firefox webkit
+      - run: pnpm test:coverage
+      - run: pnpm test:browser:compat
+      - name: Add coverage summary
+        if: ${{ !cancelled() }}
+        run: pnpm coverage:summary >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+      - run: pnpm build
+      - run: pnpm exec tsc --ignoreConfig --noEmit --strict --skipLibCheck false --module ESNext --moduleResolution bundler --lib ES2022,DOM packages/xterm/dist/index.d.ts
+      - name: Upload the built documentation site
+        if: ${{ inputs.release_tag != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: docs-site-${{ inputs.release_tag }}
+          path: apps/docs/dist/
+          if-no-files-found: error
+          retention-days: 2
+      - name: Validate release metadata
+        if: ${{ inputs.release_tag != '' }}
+        run: pnpm release:preflight -- --tag "${{ inputs.release_tag }}" --require-main --require-clean
+      - name: Pack release archives
+        if: ${{ inputs.release_tag != '' }}
+        run: pnpm release:pack
+      - name: Test package archives
+        if: ${{ inputs.release_tag == '' }}
+        run: pnpm test:pack
+      - name: Test exact release archives
+        if: ${{ inputs.release_tag != '' }}
+        run: pnpm test:pack -- --archives .release/npm
+      - name: Upload tested release archives
+        if: ${{ inputs.release_tag != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: npm-release-${{ inputs.release_tag }}
+          path: .release/npm/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0

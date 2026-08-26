@@ -1,0 +1,43 @@
+@import "../../core/src/style.css";
+
+.xterm {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.xterm .xterm-screen {
+  position: absolute;
+  inset: 0;
+  right: 14px;
+}
+
+.xterm .xterm-viewport {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 14px;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  z-index: 6;
+}
+
+.xterm .xterm-scroll-area {
+  width: 1px;
+}
+
+.xterm .xterm-helper-textarea {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.xterm .xterm-link-decoration {
+  position: absolute;
+  z-index: 5;
+  height: 1px;
+  background: currentColor;
+  pointer-events: none;
+}

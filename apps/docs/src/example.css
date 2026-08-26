@@ -1,0 +1,214 @@
+/*
+ * The example pins the landing page's light palette in every theme. The terminal renders opaque
+ * dark text on a nearly transparent surface, which is only legible over a light backdrop, so this
+ * page opts out of the site's dark theme rather than rendering unreadable output.
+ */
+.example-page {
+  color-scheme: light;
+  --surface: #f2f0ea;
+  --surface-raised: #e8e5dd;
+  --surface-strong: #dcd8cd;
+  --text: #262722;
+  --text-muted: #67695f;
+  --line: #c8c4b9;
+  --accent: #a85f22;
+  --accent-contrast: #faf8f2;
+  --terminal: #161915;
+  --terminal-line: #343a31;
+  min-height: 100dvh;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.example-page .site-header {
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+}
+
+.nav-current {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.example-main {
+  position: relative;
+  width: var(--container);
+  margin-inline: auto;
+  padding: 72px 0 120px;
+}
+
+/* Fine detail behind the window. Sharp lines are what make the transparency legible: a soft
+   gradient alone could pass for a flat tint. */
+.example-grid {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(124, 84, 40, 0.1) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(124, 84, 40, 0.1) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: linear-gradient(180deg, #000 0%, #000 68%, transparent 100%);
+}
+
+.example-copy {
+  max-width: 54ch;
+}
+
+.example-copy h1 {
+  max-width: 16ch;
+  font-size: clamp(38px, 4vw, 58px);
+}
+
+.example-lede {
+  max-width: 50ch;
+  margin: 24px 0 0;
+  color: var(--text-muted);
+  font-size: 17px;
+  line-height: 1.6;
+}
+
+.example-facts {
+  margin: 40px 0;
+  display: grid;
+  gap: 1px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--line);
+}
+
+.example-facts > div {
+  padding: 20px 22px;
+  background: color-mix(in srgb, var(--surface-raised) 88%, transparent);
+}
+
+.example-facts dt {
+  margin-bottom: 6px;
+  color: var(--accent);
+  font: 700 11px / 1 var(--mono);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.example-facts dd {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.example-facts code,
+.example-copy p code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+.example-copy pre {
+  margin-bottom: 24px;
+}
+
+/* The floating window. Fixed size on purpose: this example does not resize. */
+.glass-window {
+  position: fixed;
+  top: 132px;
+  right: max(32px, calc(50vw - 640px));
+  z-index: 5;
+  /* Same box as the landing page terminal. That width is the hero grid's second column, so it is
+     reproduced from the same container, gap, and 1.35/2.2 track ratio rather than pinned to a
+     number that would drift the moment the hero changes. */
+  width: calc((min(1380px, 100vw - 64px) - clamp(48px, 6vw, 104px)) * 1.35 / 2.2);
+  border: 1px solid rgba(38, 39, 34, 0.22);
+  border-radius: var(--radius);
+  background: rgba(250, 248, 242, 0.06);
+  box-shadow:
+    0 24px 70px rgba(52, 40, 26, 0.18),
+    0 2px 8px rgba(52, 40, 26, 0.1);
+  backdrop-filter: blur(1.5px);
+  transform: translate3d(var(--drag-x, 0px), var(--drag-y, 0px), 0);
+  will-change: transform;
+}
+
+.glass-window.is-dragging {
+  box-shadow:
+    0 34px 90px rgba(52, 40, 26, 0.26),
+    0 2px 8px rgba(52, 40, 26, 0.12);
+}
+
+.glass-titlebar {
+  height: 34px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid rgba(38, 39, 34, 0.14);
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+  background: rgba(250, 248, 242, 0.44);
+  color: var(--text);
+  font: 11px / 1 var(--mono);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.glass-window.is-dragging .glass-titlebar {
+  cursor: grabbing;
+}
+
+.glass-title {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.glass-status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Outranks the landing page's opaque `#terminal` gutter, which would frame the window in a
+   solid block and defeat the transparency this page exists to show. */
+.example-page #terminal.glass-terminal {
+  height: clamp(340px, 52vh, 540px);
+  padding: 8px;
+  background: transparent;
+}
+
+.example-page .terminal-error {
+  inset: 34px 0 0;
+  padding: 20px;
+  border-radius: 0 0 var(--radius) var(--radius);
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  color: #9c3a24;
+  font-size: 13px;
+}
+
+@media (max-width: 1100px) {
+  .glass-window {
+    position: static;
+    width: 100%;
+    margin-top: 48px;
+    transform: none;
+  }
+  .glass-titlebar {
+    cursor: default;
+  }
+  .example-copy {
+    max-width: none;
+  }
+}
+
+@media (max-width: 600px) {
+  .example-main {
+    padding: 48px 0 72px;
+  }
+  .example-page #terminal.glass-terminal {
+    height: 390px;
+  }
+}

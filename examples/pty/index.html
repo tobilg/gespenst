@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>gespenst · PTY example</title>
+    <style>
+      :root {
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        color: #d9dedc;
+        background: #0d0f0e;
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background:
+          radial-gradient(circle at 18% 12%, #1b3a2d 0, transparent 32rem),
+          #0d0f0e;
+      }
+
+      main {
+        width: min(1120px, 100%);
+        border: 1px solid #2b332f;
+        border-radius: 12px;
+        overflow: hidden;
+        background: #111412;
+        box-shadow: 0 32px 90px #000a;
+      }
+
+      header {
+        min-height: 54px;
+        padding: 0 16px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        border-bottom: 1px solid #252b28;
+      }
+
+      h1 {
+        margin: 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      #status {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: #909993;
+        font-size: 12px;
+      }
+
+      #status::before {
+        content: '';
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #d09a50;
+      }
+
+      #status[data-state='connected']::before { background: #67ca8d; }
+      #status[data-state='disconnected']::before { background: #d66d65; }
+
+      button {
+        border: 1px solid #3a4540;
+        border-radius: 6px;
+        padding: 6px 10px;
+        color: inherit;
+        background: #1a1f1c;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      button:disabled { cursor: default; opacity: 0.45; }
+
+      #terminal {
+        height: min(720px, calc(100vh - 150px));
+        min-height: 360px;
+        padding: 12px;
+      }
+
+      footer {
+        padding: 9px 16px;
+        border-top: 1px solid #252b28;
+        color: #727c76;
+        font-size: 11px;
+      }
+
+      code { color: #a3d7b6; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>@gespenst/core / local PTY</h1>
+        <div id="status" data-state="connecting" role="status">Connecting</div>
+        <button id="reconnect" type="button" disabled>Reconnect</button>
+      </header>
+      <div id="terminal"></div>
+      <footer>Binary frames carry PTY bytes · text frames carry <code>resize</code> controls</footer>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

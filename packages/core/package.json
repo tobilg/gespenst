@@ -1,0 +1,49 @@
+{
+  "name": "@gespenst/core",
+  "version": "0.1.0",
+  "description": "A fast Ghostty-powered terminal emulator for TypeScript and the web",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tobilg/gespenst.git"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./headless": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core.js"
+    },
+    "./style.css": "./dist/index.css",
+    "./ghostty-vt.wasm": "./dist/ghostty-vt.wasm",
+    "./ghostty-callbacks.wasm": "./dist/ghostty-callbacks.wasm",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": [
+    "./dist/index.css"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build:js": "vite build",
+    "build:types": "tsc -p tsconfig.build.json --emitDeclarationOnly && node ../../scripts/postprocess-core-types.mjs",
+    "build": "pnpm run build:js && pnpm run build:types && node ../../scripts/copy-package-files.mjs core",
+    "typecheck": "tsc -p ../../tsconfig.json --noEmit",
+    "test": "vitest run --root ../..",
+    "prepack": "pnpm --dir ../.. run build:callbacks && pnpm run build && pnpm --dir ../.. run verify:wasm"
+  }
+}

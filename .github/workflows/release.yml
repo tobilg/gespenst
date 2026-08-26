@@ -1,0 +1,86 @@
+name: Release stable
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-stable
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+
+  publish:
+    needs: quality
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-release-${{ github.ref_name }}
+          path: release
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Verify release archives and npm trusted-publishing support
+        working-directory: release
+        run: |
+          npm_version="$(npm --version)"
+          node -e "const [major, minor] = process.argv[1].split('.').map(Number); if (major < 11 || (major === 11 && minor < 5)) throw new Error('npm 11.5.1 or newer is required')" "${npm_version}"
+          sha256sum --check SHA256SUMS
+      - name: Publish with npm trusted publishing
+        working-directory: release
+        shell: bash
+        run: |
+          while IFS=$'\t' read -r name version archive integrity; do
+            if published_integrity="$(npm view "${name}@${version}" dist.integrity --json 2>/dev/null)"; then
+              published_integrity="${published_integrity//\"/}"
+              if [[ "${published_integrity}" != "${integrity}" ]]; then
+                echo "Registry integrity mismatch for ${name}@${version}" >&2
+                exit 1
+              fi
+              echo "${name}@${version} is already published with the expected integrity"
+            else
+              npm publish "./${archive}" --access public --tag latest
+            fi
+          done < publish-plan.tsv
+
+  deploy-docs:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: cloudflare-pages
+    permissions:
+      contents: read
+    steps:
+      # The site is deployed exactly as CI built and verified it, so this job needs no checkout
+      # and no workspace install.
+      - uses: actions/download-artifact@v8
+        with:
+          name: docs-site-${{ github.ref_name }}
+          path: site
+      - name: Deploy the documentation site to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          packageManager: npm
+          command: >-
+            pages deploy site
+            --project-name=gespenst-docs
+            --branch=main
+            --commit-hash=${{ github.sha }}
+            --commit-message=${{ github.ref_name }}

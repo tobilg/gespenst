@@ -1,0 +1,16 @@
+packages:
+  - packages/*
+  - apps/*
+  - examples/*
+  - benchmarks
+  - tools/*
+
+catalog:
+  '@biomejs/biome': 2.2.4
+  '@types/node': 24.3.0
+  '@vitest/browser': 4.1.11
+  '@vitest/browser-playwright': 4.1.11
+  '@vitest/coverage-v8': 4.1.11
+  typescript: 7.0.2
+  vite: 8.2.2
+  vitest: 4.1.11

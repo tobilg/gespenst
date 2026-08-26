@@ -1,0 +1,41 @@
+{
+  "name": "@gespenst/svelte",
+  "version": "0.1.0",
+  "description": "Svelte bindings for the Ghostty-powered web terminal",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tobilg/gespenst.git",
+    "directory": "packages/svelte"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@gespenst/core": "^0.1.0",
+    "svelte": ">=5.55.7 <6"
+  },
+  "devDependencies": {
+    "@gespenst/core": "workspace:*"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}
