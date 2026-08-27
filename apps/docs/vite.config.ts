@@ -4,10 +4,7 @@ import { defineConfig } from 'vite';
 const configuredBase = process.env.DOCS_BASE_PATH ?? '/';
 // Social scrapers do not resolve relative URLs, so og:image and friends need a real origin. Set
 // DOCS_SITE_URL when deploying anywhere other than the default Pages domain.
-const siteUrl = (process.env.DOCS_SITE_URL ?? 'https://gespenst-docs.pages.dev').replace(
-  /\/+$/u,
-  ''
-);
+const siteUrl = (process.env.DOCS_SITE_URL ?? 'https://gespenst.dev').replace(/\/+$/u, '');
 export default defineConfig({
   appType: 'mpa',
   plugins: [

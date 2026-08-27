@@ -146,6 +146,7 @@ vite.config.ts.timestamp-*
 external-projects/
 plans/
 .release/
+test-results/published/
 
 # Generated documentation assets and TypeDoc API reference. `_headers` is hand-authored and must
 # stay tracked: it is the deployed site's cross-origin isolation policy.
@@ -156,3 +157,4 @@ apps/docs/public/*
 .probe*
 
 .DS_Store
+.wrangler

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Gespenst published package harness</title>
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Registry consumer validation</p>
+          <h1>Gespenst published package harness</h1>
+          <p class="lede">
+            Every scenario on this page imports the versions installed from npm into an isolated
+            consumer project.
+          </p>
+        </div>
+        <div class="actions">
+          <button id="run-functional" type="button">Run functional suite</button>
+          <button id="run-benchmarks" type="button">Compare performance</button>
+          <button id="download-report" type="button" disabled>Download report</button>
+        </div>
+      </header>
+
+      <section class="summary" aria-labelledby="summary-title">
+        <div>
+          <p class="eyebrow" id="summary-title">Current run</p>
+          <p id="summary-status" class="summary-value" data-status="idle">Preparing…</p>
+        </div>
+        <dl id="environment"></dl>
+      </section>
+
+      <section aria-labelledby="packages-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Resolved artifacts</p>
+            <h2 id="packages-title">npm packages</h2>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Package</th><th>Version</th><th>Scenario</th><th>Integrity</th></tr></thead>
+            <tbody id="package-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="scenarios-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Browser validation</p>
+            <h2 id="scenarios-title">Functional scenarios</h2>
+          </div>
+          <p>Tests keep successful terminals visible for inspection.</p>
+        </div>
+        <div id="scenario-grid" class="scenario-grid"></div>
+      </section>
+
+      <section aria-labelledby="benchmark-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Same browser, same workload</p>
+            <h2 id="benchmark-title">Gespenst and xterm.js</h2>
+          </div>
+          <p>Timings are diagnostic measurements, not universal performance claims.</p>
+        </div>
+        <div id="benchmark-results" class="benchmark-results empty">
+          Run the comparison to collect initialization, write, resize, and bundle metrics.
+        </div>
+      </section>
+
+      <section aria-labelledby="log-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Diagnostics</p>
+            <h2 id="log-title">Run log</h2>
+          </div>
+        </div>
+        <pre id="run-log" aria-live="polite"></pre>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

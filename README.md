@@ -245,6 +245,7 @@ pnpm test
 pnpm test:browser
 pnpm test:browser:compat
 pnpm test:coverage
+pnpm test:published
 pnpm security:audit
 pnpm build
 pnpm test:pack
@@ -254,6 +255,28 @@ pnpm bench:throughput
 The workspace uses pnpm, TypeScript 7, Vite 8, Vitest, and lockstep package versions.
 Maintainers should follow the [release guide](docs/releasing.md); publishing uses tested tarballs,
 an environment-protected workflow, and npm trusted publishing rather than a long-lived token.
+
+### Validate the packages published on npm
+
+`pnpm test:published` creates an isolated temporary consumer, resolves every public
+`@gespenst/*` package from npm at `latest`, rejects workspace links, runs strict bundler and
+NodeNext consumer checks, and exercises the packages in desktop and mobile browser profiles. It
+also compares the published native and xterm-compatible terminals with the latest upstream
+`@xterm/xterm`; timings are diagnostic reports, not release gates.
+
+```sh
+pnpm test:published
+pnpm test:published -- --selector 0.1.1
+pnpm test:published -- --browser chromium,mobile-webkit --keep
+pnpm published:dev -- --selector latest
+```
+
+Results are written to `test-results/published/<timestamp>/` as JSON and Markdown. The interactive
+command serves the same registry-installed consumer locally; add `--host` to test a phone on the
+LAN, and stop it as soon as testing is complete because the harness exposes a real local PTY while
+it is running. See the [published-package harness guide](harness/published/README.md) for scenario,
+browser, and benchmark methodology.
+
 `pnpm test:coverage` runs the Node and Chromium projects together with V8 instrumentation, prints a
 combined summary, and writes browsable HTML, LCOV, and JSON reports to `coverage/`. Open
 `coverage/index.html` to inspect coverage by package and source file. Coverage reports all shipped

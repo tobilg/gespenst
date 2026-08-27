@@ -57,6 +57,13 @@ describe('buffer search matcher', () => {
     empty.accept(row(0, cells('text')));
     expect(empty.finish()).toHaveLength(0);
   });
+
+  it('treats hyphens as literal text in Unicode patterns', () => {
+    const scanner = new BufferSearchScanner(pattern('needle-wide'), false);
+    scanner.accept(row(0, cells('find needle-wide here')));
+
+    expect(scanner.finish()[0]?.value.text).toBe('needle-wide');
+  });
 });
 
 function pattern(

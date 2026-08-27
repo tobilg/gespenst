@@ -84,6 +84,10 @@ pnpm docs:deploy
 `docs:deploy` fetches Wrangler with `pnpm dlx` rather than adding it to the workspace, and uses the
 locally authenticated Wrangler session.
 
+Social tags and canonical URLs are absolute, so they are baked in at build time from
+`DOCS_SITE_URL`, which defaults to `https://gespenst.dev`. Point it elsewhere when deploying a
+preview or a fork, or the share cards will name the production site.
+
 The site is built for the root of its domain. Deploying it under a subpath instead requires
 rebuilding with `DOCS_BASE_PATH`, for example `DOCS_BASE_PATH=/gespenst/ pnpm docs:build`, because
 the base path is baked into the generated asset and page URLs.
@@ -109,6 +113,34 @@ publishes the remaining archives through OIDC, and includes npm provenance for t
 Never move a published tag. A rerun skips a package when either the raw archive integrity matches or
 the decompressed tar content is identical. The latter handles npm's platform-specific gzip header
 without weakening the package-content check; any actual content mismatch fails the release.
+
+## Post-publication validation
+
+After npm has updated the `latest` tag, validate what consumers actually receive rather than the
+workspace build:
+
+```sh
+pnpm test:published
+```
+
+The command resolves exact versions and integrity metadata from npm, installs all public packages
+into a temporary project outside the workspace, rejects local dependency protocols, and runs
+headless, bundler, NodeNext, desktop, mobile, mock transport, real PTY, framework, addon, and xterm
+compatibility scenarios. Chromium also records comparative native, compatibility-layer, and
+upstream xterm.js performance plus emitted bundle sizes. Reports are stored under
+`test-results/published/<timestamp>/`; performance values are for comparison on that machine and
+are not pass/fail thresholds.
+
+Validate a fixed version or narrow the browser matrix while diagnosing a failure:
+
+```sh
+pnpm test:published -- --selector X.Y.Z
+pnpm test:published -- --selector X.Y.Z --browser chromium,mobile-webkit --keep
+```
+
+Use `pnpm published:dev -- --selector X.Y.Z` for an inspectable local UI. Add `--host` only for
+short-lived testing on a trusted LAN: the harness deliberately starts a real local shell PTY and
+prints the device URL, so it must not be exposed to an untrusted network.
 
 ## Resuming a failed release
 
