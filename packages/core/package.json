@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A fast Ghostty-powered terminal emulator for TypeScript and the web",
   "type": "module",
   "license": "MIT",

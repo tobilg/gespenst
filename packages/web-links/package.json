@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/web-links",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Safe web link detection for gespenst",
   "type": "module",
   "license": "MIT",
@@ -24,7 +24,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.0"
+    "@gespenst/core": "^0.1.1"
   },
   "devDependencies": {
     "@gespenst/core": "workspace:*"

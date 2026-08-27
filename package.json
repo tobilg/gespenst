@@ -1,6 +1,6 @@
 {
   "name": "gespenst-workspace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.33.3",
@@ -37,14 +37,11 @@
     "format": "biome format --write packages scripts demo examples benchmarks apps tools docs index.html package.json pnpm-workspace.yaml biome.json tsconfig.json typedoc.json vite.workspace.config.ts vitest.config.ts vitest.browser.config.ts vitest.browser.compat.config.ts vitest.coverage.config.ts",
     "update:wasm": "node scripts/update-wasm.mjs",
     "verify:wasm": "node scripts/verify-wasm.mjs",
-    "changeset": "changeset",
-    "version-packages": "changeset version",
+    "release:version": "node scripts/set-release-version.mjs",
     "release": "pnpm build && pnpm release:pack && pnpm test:pack -- --archives .release/npm"
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:",
-    "@changesets/changelog-github": "0.5.2",
-    "@changesets/cli": "2.29.7",
     "@lydell/node-pty": "1.1.0",
     "@types/node": "catalog:",
     "@types/react": "19.1.11",

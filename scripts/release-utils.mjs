@@ -32,7 +32,6 @@ export async function validateRelease(root, tag) {
   }
 
   const publicPackages = await discoverPublicPackages(root);
-  const publicNames = new Set(publicPackages.map(({ manifest }) => manifest.name));
   for (const { manifest } of publicPackages) {
     if (version && manifest.version !== version) {
       errors.push(`${manifest.name} is ${manifest.version}; expected ${version}`);
@@ -40,28 +39,6 @@ export async function validateRelease(root, tag) {
     if (manifest.repository?.url !== EXPECTED_REPOSITORY) {
       errors.push(`${manifest.name} repository must be ${EXPECTED_REPOSITORY}`);
     }
-  }
-
-  const changesetConfig = JSON.parse(
-    await readFile(resolve(root, '.changeset/config.json'), 'utf8')
-  );
-  const fixedGroups = changesetConfig.fixed ?? [];
-  if (fixedGroups.length !== 1)
-    errors.push('All public packages must share one fixed Changesets group');
-  const fixedNames = new Set(fixedGroups[0] ?? []);
-  for (const name of publicNames) {
-    if (!fixedNames.has(name)) errors.push(`${name} is missing from the fixed Changesets group`);
-  }
-  for (const name of fixedNames) {
-    if (!publicNames.has(name))
-      errors.push(`${name} is in the fixed Changesets group but not public`);
-  }
-
-  const changesets = (await readdir(resolve(root, '.changeset'))).filter(
-    (file) => file.endsWith('.md') && file.toLowerCase() !== 'readme.md'
-  );
-  if (changesets.length > 0) {
-    errors.push(`Unconsumed changesets remain: ${changesets.sort().join(', ')}`);
   }
 
   return { errors, publicPackages, version };

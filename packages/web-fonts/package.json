@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/web-fonts",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Worker-safe web font loading for gespenst",
   "type": "module",
   "license": "MIT",
@@ -24,7 +24,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.0"
+    "@gespenst/core": "^0.1.1"
   },
   "devDependencies": {
     "@gespenst/core": "workspace:*"

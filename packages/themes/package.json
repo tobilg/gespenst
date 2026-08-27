@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/themes",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Curated, tree-shakable themes for Gespenst terminals",
   "type": "module",
   "license": "MIT",

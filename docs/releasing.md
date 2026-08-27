@@ -1,14 +1,23 @@
 # Releasing Gespenst
 
-Gespenst publishes every public package at one lockstep version. Changesets records future release
-notes and version changes; the release workflow publishes only archives that passed the complete CI
-and packed-consumer browser suite.
+Gespenst publishes every public package at one lockstep version. The repository-owned version tool
+updates the private workspace root, every public package, and explicit internal dependency ranges.
+The release workflow publishes only archives that passed the complete CI and packed-consumer
+browser suite.
 
 ## Normal releases
 
-1. Add Changesets with user-facing changes as pull requests land.
-2. Run `pnpm version-packages`, review the generated versions and changelogs, and commit them.
-3. Run the local release checks from a clean checkout:
+1. Set the intended stable version and regenerate the lockfile:
+
+   ```sh
+   pnpm release:version -- X.Y.Z
+   pnpm install
+   ```
+
+   Review the root and package manifest changes before continuing. The version command rejects tags,
+   prereleases, and incomplete semantic versions; pass `0.1.1`, not `v0.1.1`.
+
+2. Run the local release checks:
 
    ```sh
    pnpm install --frozen-lockfile
@@ -18,12 +27,20 @@ and packed-consumer browser suite.
    pnpm test:coverage
    pnpm test:browser:compat
    pnpm build
-   pnpm release:preflight -- --tag vX.Y.Z --require-main --require-clean
+   pnpm release:preflight -- --tag vX.Y.Z
    pnpm release:pack
    pnpm test:pack -- --archives .release/npm
    ```
 
-4. Push the release commit to `main`, create the matching `vX.Y.Z` tag, and push the tag.
+3. Commit the version changes and push the release commit to `main`.
+4. From that clean commit, run the strict preflight and push the matching tag:
+
+   ```sh
+   pnpm release:preflight -- --tag vX.Y.Z --require-main --require-clean
+   git tag -a vX.Y.Z -m "vX.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
 5. Approve the protected `npm` GitHub environment. The workflow verifies the tag and publishes the
    previously tested archives using npm trusted publishing.
 

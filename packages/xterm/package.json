@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/xterm",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "xterm.js 6.0 public API compatibility powered by Ghostty",
   "type": "module",
   "license": "MIT",

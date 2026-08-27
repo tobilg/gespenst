@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/react",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "React bindings for the Ghostty-powered web terminal",
   "type": "module",
   "license": "MIT",
@@ -24,7 +24,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.0",
+    "@gespenst/core": "^0.1.1",
     "react": ">=19"
   },
   "devDependencies": {

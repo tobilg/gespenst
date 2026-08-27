@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/shell",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Portable browser Bash facade for gespenst powered by BashKit",
   "type": "module",
   "license": "MIT",
@@ -24,7 +24,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.0"
+    "@gespenst/core": "^0.1.1"
   },
   "dependencies": {
     "@gespenst/bashkit": "workspace:*"

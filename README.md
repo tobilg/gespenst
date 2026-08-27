@@ -251,7 +251,7 @@ pnpm test:pack
 pnpm bench:throughput
 ```
 
-The workspace uses pnpm, TypeScript 7, Vite 8, Vitest, Changesets, and lockstep package versions.
+The workspace uses pnpm, TypeScript 7, Vite 8, Vitest, and lockstep package versions.
 Maintainers should follow the [release guide](docs/releasing.md); publishing uses tested tarballs,
 an environment-protected workflow, and npm trusted publishing rather than a long-lived token.
 `pnpm test:coverage` runs the Node and Chromium projects together with V8 instrumentation, prints a
