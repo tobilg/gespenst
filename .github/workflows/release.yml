@@ -3,6 +3,16 @@ name: Release stable
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Stable tag whose verified artifacts should be resumed
+        required: true
+        type: string
+      source_run_id:
+        description: Failed release run that produced the verified artifacts
+        required: true
+        type: string
 
 concurrency:
   group: release-stable
@@ -13,6 +23,7 @@ permissions:
 
 jobs:
   quality:
+    if: github.event_name == 'push'
     permissions:
       contents: read
     uses: ./.github/workflows/ci.yml
@@ -21,16 +32,20 @@ jobs:
 
   publish:
     needs: quality
+    if: ${{ always() && (needs.quality.result == 'success' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     environment: npm
     permissions:
+      actions: read
       contents: read
       id-token: write
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: npm-release-${{ github.ref_name }}
+          name: npm-release-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
           path: release
+          run-id: ${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -46,12 +61,27 @@ jobs:
         working-directory: release
         shell: bash
         run: |
-          while IFS=$'\t' read -r name version archive integrity; do
+          while IFS=$'\t' read -r name version archive integrity content_sha256; do
             if published_integrity="$(npm view "${name}@${version}" dist.integrity --json 2>/dev/null)"; then
               published_integrity="${published_integrity//\"/}"
               if [[ "${published_integrity}" != "${integrity}" ]]; then
-                echo "Registry integrity mismatch for ${name}@${version}" >&2
-                exit 1
+                published_tarball="$(npm view "${name}@${version}" dist.tarball --json)"
+                published_tarball="${published_tarball//\"/}"
+                if [[ "${published_tarball}" != https://registry.npmjs.org/* ]]; then
+                  echo "Unexpected registry tarball URL for ${name}@${version}" >&2
+                  exit 1
+                fi
+                downloaded_archive="$(mktemp)"
+                curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+                  "${published_tarball}" --output "${downloaded_archive}"
+                published_content_sha256="$(gzip -dc "${downloaded_archive}" | sha256sum | cut -d ' ' -f 1)"
+                rm -f "${downloaded_archive}"
+                if [[ "${published_content_sha256}" != "${content_sha256}" ]]; then
+                  echo "Registry content mismatch for ${name}@${version}" >&2
+                  exit 1
+                fi
+                echo "${name}@${version} is already published with equivalent package contents"
+                continue
               fi
               echo "${name}@${version} is already published with the expected integrity"
             else
@@ -64,14 +94,17 @@ jobs:
     runs-on: ubuntu-latest
     environment: cloudflare-pages
     permissions:
+      actions: read
       contents: read
     steps:
       # The site is deployed exactly as CI built and verified it, so this job needs no checkout
       # and no workspace install.
       - uses: actions/download-artifact@v8
         with:
-          name: docs-site-${{ github.ref_name }}
+          name: docs-site-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
           path: site
+          run-id: ${{ github.event_name == 'workflow_dispatch' && inputs.source_run_id || github.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Deploy the documentation site to Cloudflare Pages
         uses: cloudflare/wrangler-action@v4
         with:
@@ -83,4 +116,4 @@ jobs:
             --project-name=gespenst-docs
             --branch=main
             --commit-hash=${{ github.sha }}
-            --commit-message=${{ github.ref_name }}
+            --commit-message=${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}

@@ -88,23 +88,41 @@ The site is built for the root of its domain. Deploying it under a subpath inste
 rebuilding with `DOCS_BASE_PATH`, for example `DOCS_BASE_PATH=/gespenst/ pnpm docs:build`, because
 the base path is baked into the generated asset and page URLs.
 
-## One-time v0.1.0 bootstrap
+## One-time package bootstrap
 
 npm only allows trusted publishing to be configured for packages that already exist. Prepare
-`v0.1.0` with the commands above, verify `.release/npm/SHA256SUMS`, and publish the archives in the
-order recorded by `.release/npm/publish-plan.tsv` from a maintainer account protected by 2FA:
+the intended release with the commands above, verify `.release/npm/SHA256SUMS`, and publish only the
+new packages in dependency order from a maintainer account protected by 2FA. Local publication must
+disable provenance because no supported CI identity exists:
 
 ```sh
 cd .release/npm
 shasum -a 256 --check SHA256SUMS
-while IFS=$'\t' read -r name version archive integrity; do
-  npm publish "./${archive}" --access public --tag latest
-done < publish-plan.tsv
+npm publish ./gespenst-new-package-X.Y.Z.tgz \
+  --access public --tag latest --provenance=false --otp=<current-code>
 ```
 
-After all packages exist, configure their trusted publishers, enable required approval on the
-`npm` GitHub environment, and push `v0.1.0`. That tag run verifies registry integrity and performs no
-duplicate publication. All subsequent releases publish through OIDC and include npm provenance.
+After each package exists, configure its trusted publisher and enable required approval on the
+`npm` GitHub environment before pushing the tag. The tag run verifies already-published packages,
+publishes the remaining archives through OIDC, and includes npm provenance for those CI publications.
 
-Never move a published tag. A rerun skips a package only when the registry's integrity exactly
-matches the prepared archive; any mismatch fails the release.
+Never move a published tag. A rerun skips a package when either the raw archive integrity matches or
+the decompressed tar content is identical. The latter handles npm's platform-specific gzip header
+without weakening the package-content check; any actual content mismatch fails the release.
+
+## Resuming a failed release
+
+If quality checks produced verified artifacts but publication failed partway through, fix the
+release workflow on `main` and resume the original artifacts instead of moving the tag or rebuilding
+them. Supply the stable tag and the failed run ID:
+
+```sh
+gh workflow run release.yml \
+  --ref main \
+  -f release_tag=vX.Y.Z \
+  -f source_run_id=<run-id>
+```
+
+The protected `npm` environment still requires approval. The recovery run downloads the original
+npm and documentation artifacts, verifies every archive, skips packages whose contents already
+exist, publishes the remainder through OIDC, and deploys the matching documentation artifact.

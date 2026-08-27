@@ -3,9 +3,15 @@ import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { gunzipSync } from 'node:zlib';
 
 const execute = promisify(execFile);
 const EXPECTED_REPOSITORY = 'git+https://github.com/tobilg/gespenst.git';
+
+/** Hashes the deterministic tar stream without platform-specific gzip wrapper metadata. */
+export function packageContentSha256(archiveBytes) {
+  return createHash('sha256').update(gunzipSync(archiveBytes)).digest('hex');
+}
 
 export async function discoverPublicPackages(root) {
   const packagesRoot = resolve(root, 'packages');
@@ -95,23 +101,29 @@ export async function packPublicPackages(root, destination) {
     packed.push({
       ...item,
       archive,
+      contentSha256: packageContentSha256(bytes),
       integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
       sha256: createHash('sha256').update(bytes).digest('hex'),
     });
   }
 
   const ordered = sortPackagesForPublish(packed);
-  const plan = ordered.map(({ archive, integrity, manifest, sha256 }) => ({
+  const plan = ordered.map(({ archive, contentSha256, integrity, manifest, sha256 }) => ({
     name: manifest.name,
     version: manifest.version,
     archive,
     integrity,
     sha256,
+    contentSha256,
   }));
   await writeFile(resolve(destination, 'publish-plan.json'), `${JSON.stringify(plan, null, 2)}\n`);
   await writeFile(
     resolve(destination, 'publish-plan.tsv'),
-    `${plan.map((item) => [item.name, item.version, item.archive, item.integrity].join('\t')).join('\n')}\n`
+    `${plan
+      .map((item) =>
+        [item.name, item.version, item.archive, item.integrity, item.contentSha256].join('\t')
+      )
+      .join('\n')}\n`
   );
   await writeFile(
     resolve(destination, 'SHA256SUMS'),

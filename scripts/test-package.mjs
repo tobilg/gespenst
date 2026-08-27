@@ -8,7 +8,11 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { chromium } from 'playwright';
 import { build as viteBuild } from 'vite';
-import { discoverPublicPackages, packPublicPackages } from './release-utils.mjs';
+import {
+  discoverPublicPackages,
+  packageContentSha256,
+  packPublicPackages,
+} from './release-utils.mjs';
 
 const execute = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -83,7 +87,12 @@ try {
     const archiveBytes = await readFile(archivePath);
     const sha256 = createHash('sha256').update(archiveBytes).digest('hex');
     const integrity = `sha512-${createHash('sha512').update(archiveBytes).digest('base64')}`;
-    if (sha256 !== planned.sha256 || integrity !== planned.integrity) {
+    const contentSha256 = packageContentSha256(archiveBytes);
+    if (
+      sha256 !== planned.sha256 ||
+      integrity !== planned.integrity ||
+      contentSha256 !== planned.contentSha256
+    ) {
       throw new Error(`Release archive checksum mismatch for ${manifest.name}`);
     }
     const { stdout } = await execute('tar', ['-tf', archivePath], {

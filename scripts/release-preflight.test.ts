@@ -1,7 +1,8 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
-import { sortPackagesForPublish, validateRelease } from './release-utils.mjs';
+import { packageContentSha256, sortPackagesForPublish, validateRelease } from './release-utils.mjs';
 
 describe('release preflight', () => {
   it('accepts a clean lockstep stable release', async () => {
@@ -39,6 +40,17 @@ describe('release preflight', () => {
       '@gespenst/core',
       '@gespenst/addon',
     ]);
+  });
+
+  it('ignores the platform byte in a gzip wrapper when hashing package contents', () => {
+    const archive = gzipSync('identical tar stream');
+    const macos = Buffer.from(archive);
+    const linux = Buffer.from(archive);
+    macos[9] = 19;
+    linux[9] = 3;
+
+    expect(macos).not.toEqual(linux);
+    expect(packageContentSha256(macos)).toBe(packageContentSha256(linux));
   });
 });
 

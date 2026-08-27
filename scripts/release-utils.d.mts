@@ -14,6 +14,7 @@ export interface WorkspacePackage {
 }
 
 export function discoverPublicPackages(root: string): Promise<WorkspacePackage[]>;
+export function packageContentSha256(archiveBytes: Uint8Array): string;
 export function validateRelease(
   root: string,
   tag: string | undefined
@@ -30,6 +31,7 @@ export function packPublicPackages(
     archive: string;
     integrity: string;
     sha256: string;
+    contentSha256: string;
   }>;
 }>;
 export const EXPECTED_REPOSITORY: string;
