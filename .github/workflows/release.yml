@@ -61,10 +61,16 @@ jobs:
         working-directory: release
         shell: bash
         run: |
-          while IFS=$'\t' read -r name version archive integrity content_sha256; do
+          while IFS=$'\t' read -r name version archive integrity _recorded_content_sha256; do
             if published_integrity="$(npm view "${name}@${version}" dist.integrity --json 2>/dev/null)"; then
               published_integrity="${published_integrity//\"/}"
               if [[ "${published_integrity}" != "${integrity}" ]]; then
+                # Older release artifacts do not have a content-hash column in
+                # publish-plan.tsv. Derive it from the archive after SHA256SUMS
+                # has authenticated that archive instead. Comparing the
+                # decompressed tar stream intentionally ignores platform-specific
+                # gzip header bytes added by npm pack on macOS versus Linux.
+                archive_content_sha256="$(gzip -dc "./${archive}" | sha256sum | cut -d ' ' -f 1)"
                 published_tarball="$(npm view "${name}@${version}" dist.tarball --json)"
                 published_tarball="${published_tarball//\"/}"
                 if [[ "${published_tarball}" != https://registry.npmjs.org/* ]]; then
@@ -76,7 +82,7 @@ jobs:
                   "${published_tarball}" --output "${downloaded_archive}"
                 published_content_sha256="$(gzip -dc "${downloaded_archive}" | sha256sum | cut -d ' ' -f 1)"
                 rm -f "${downloaded_archive}"
-                if [[ "${published_content_sha256}" != "${content_sha256}" ]]; then
+                if [[ "${published_content_sha256}" != "${archive_content_sha256}" ]]; then
                   echo "Registry content mismatch for ${name}@${version}" >&2
                   exit 1
                 fi
