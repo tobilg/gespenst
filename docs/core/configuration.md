@@ -24,18 +24,24 @@ These values match the default behavior, so omit them unless being explicit help
 | `'shared'` | Multiple terminal sessions multiplexed through one worker | Terminal-heavy views where worker count matters |
 | `false` | Parse and render on the main thread | Tests, constrained embeds, or unsupported worker environments |
 
-The default behaves like `'dedicated'` when `Worker` and `OffscreenCanvas` are available, with a
-main-thread fallback. A shared worker reduces worker overhead, but one busy session can share an
-event loop with the others.
+The default behaves like `'dedicated'` when `Worker` and `OffscreenCanvas` are available. If that
+worker fails before the terminal becomes ready, core recreates its transferred canvases and retries
+on the main thread. Shared-worker startup remains strict because silently leaving the shared runtime
+would violate the requested ownership model. Live worker crashes remain terminal errors.
 
 ## Renderer policy
 
-`'auto'` is the recommended default. It attempts WebGPU, then WebGL2, then Canvas 2D. An explicit
-`'webgpu'` request fails if WebGPU cannot initialize. An explicit `'webgl2'` request uses Canvas 2D
-when WebGL2 is unavailable. Read `terminal.renderer.backend` to report or measure the selected path.
+`'auto'` is the recommended default. It attempts WebGPU, then WebGL2, then Canvas 2D. At runtime,
+WebGPU gets one immediate device-restoration attempt and WebGL2 gets a one-second context-restoration
+window before core moves down that same ladder. Fallback is monotonic for the lifetime of the
+terminal. An explicit `'webgpu'` request remains strict; an explicit `'webgl2'` request may use
+Canvas 2D. `terminal.renderer` is live, and the `renderer` event reports successful restoration or
+fallback.
 
 The GPU backends accelerate cell backgrounds and decorations. Browser Canvas 2D still shapes text,
-which preserves web-font flexibility and avoids a separate glyph atlas contract.
+which preserves web-font flexibility and avoids a separate glyph atlas contract. Core keeps one
+small inactive background surface for each remaining fallback candidate, but sizes and paints only
+the active one at terminal resolution.
 
 ## Grid and scrollback
 

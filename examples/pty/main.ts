@@ -20,7 +20,19 @@ terminal.on('title', (title) => {
 });
 
 reconnect.addEventListener('click', () => void connect());
-window.addEventListener('beforeunload', () => terminal.dispose());
+let restoreTerminalFocus = false;
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) {
+    restoreTerminalFocus = terminal.element.contains(document.activeElement);
+  } else {
+    terminal.dispose();
+  }
+});
+window.addEventListener('pageshow', (event) => {
+  if (!event.persisted) return;
+  terminal.fit();
+  if (restoreTerminalFocus) terminal.focus();
+});
 
 await connect();
 

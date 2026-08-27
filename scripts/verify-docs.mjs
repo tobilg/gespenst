@@ -12,6 +12,7 @@ const requiredPages = [
   'api/documents/Core_Guide.html',
   'api/documents/Core_Guide.Getting_Started.html',
   'api/documents/Core_Guide.Connecting_a_PTY.html',
+  'api/documents/Core_Guide.Browser-only_Shells.html',
   'api/documents/Core_Guide.Configuration.html',
   'api/documents/Core_Guide.Layout,_Fonts,_and_Themes.html',
   'api/documents/Core_Guide.Events,_Permissions,_and_Lifecycle.html',
@@ -25,6 +26,7 @@ const guideTitles = [
   'Core Guide',
   'Getting Started',
   'Connecting a PTY',
+  'Browser-only Shells',
   'Configuration',
   'Layout, Fonts, and Themes',
   'Events, Permissions, and Lifecycle',
@@ -36,7 +38,8 @@ const guideTitles = [
 ];
 
 for (const page of requiredPages) await assertFile(resolve(outputDirectory, page));
-await assertIsolationHeaders();
+await assertDeploymentHeaders();
+await assertNoRetiredRuntimeArtifacts();
 await assertSocialImage();
 
 const htmlFiles = await collectFiles(outputDirectory, (file) => extname(file) === '.html');
@@ -175,21 +178,53 @@ async function fileExists(file) {
   }
 }
 
-/**
- * The deployed demo runs a WASIX shell, so the host must serve cross-origin isolation headers.
- * `apps/docs/public` is otherwise generated and ignored, which makes this file easy to lose.
- */
-async function assertIsolationHeaders() {
+/** Keeps the static deployment policy present without reintroducing obsolete isolation headers. */
+async function assertDeploymentHeaders() {
   const file = resolve(outputDirectory, '_headers');
   await assertFile(file);
   const source = await readFile(file, 'utf8');
   const required = [
-    'Cross-Origin-Opener-Policy: same-origin',
-    'Cross-Origin-Embedder-Policy: require-corp',
+    'X-Content-Type-Options: nosniff',
+    'Referrer-Policy: strict-origin-when-cross-origin',
   ];
   const missing = required.filter((header) => !source.includes(header));
   if (missing.length > 0) {
     throw new Error(`_headers is missing required directives: ${missing.join(', ')}`);
+  }
+  const obsolete = ['Cross-Origin-Opener-Policy', 'Cross-Origin-Embedder-Policy'];
+  const retained = obsolete.filter((header) => source.includes(header));
+  if (retained.length > 0) {
+    throw new Error(`_headers retains obsolete isolation directives: ${retained.join(', ')}`);
+  }
+}
+
+/** Fails a docs build if an old runtime chunk, API page, or bootstrap script survives cleanup. */
+async function assertNoRetiredRuntimeArtifacts() {
+  const files = await collectFiles(outputDirectory, () => true);
+  const failures = [];
+  const forbiddenPaths = ['wasmer_js', '_gespenst_wasmer', 'coi-serviceworker'];
+  const forbiddenContent = ['cdn.wasmer.io', 'wasmer_js_bg.wasm', 'coi-serviceworker'];
+  const readableExtensions = new Set(['.css', '.html', '.js', '.json', '.map', '.mjs', '.txt']);
+
+  for (const file of files) {
+    const outputPath = webPath(relative(outputDirectory, file));
+    const lowerPath = outputPath.toLowerCase();
+    if (forbiddenPaths.some((fragment) => lowerPath.includes(fragment))) {
+      failures.push(`${outputPath}: retired runtime artifact`);
+      continue;
+    }
+    if (!readableExtensions.has(extname(file))) continue;
+    const source = await readFile(file, 'utf8');
+    const match = forbiddenContent.find((fragment) => source.includes(fragment));
+    if (match) failures.push(`${outputPath}: contains retired runtime reference ${match}`);
+  }
+
+  if (failures.length > 0) {
+    throw new Error(
+      `Retired runtime artifacts remain in documentation output:\n${failures
+        .map((failure) => `- ${failure}`)
+        .join('\n')}`
+    );
   }
 }
 

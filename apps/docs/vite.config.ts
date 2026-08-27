@@ -8,11 +8,6 @@ const siteUrl = (process.env.DOCS_SITE_URL ?? 'https://gespenst-docs.pages.dev')
   /\/+$/u,
   ''
 );
-const isolationHeaders = {
-  'Cross-Origin-Embedder-Policy': 'require-corp',
-  'Cross-Origin-Opener-Policy': 'same-origin',
-};
-
 export default defineConfig({
   appType: 'mpa',
   plugins: [
@@ -45,15 +40,9 @@ export default defineConfig({
         replacement: resolve(import.meta.dirname, '../../packages/core/src/index.ts'),
       },
       {
-        find: /^@gespenst\/wasmer$/,
-        replacement: resolve(import.meta.dirname, '../../packages/wasmer/src/index.ts'),
-      },
-      {
         find: /^@gespenst\/themes$/,
         replacement: resolve(import.meta.dirname, '../../packages/themes/src/index.ts'),
       },
     ],
   },
-  server: { headers: isolationHeaders },
-  preview: { headers: isolationHeaders },
 });

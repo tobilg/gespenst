@@ -30,16 +30,26 @@ const notificationSubscription = terminal.on('notification', ({ title, body }) =
 });
 // #endregion policy
 
-window.addEventListener(
-  'beforeunload',
-  () => {
+// #region lifecycle
+let restoreTerminalFocus = false;
+
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) {
+    restoreTerminalFocus = terminal.element.contains(document.activeElement);
+  } else {
     resizeSubscription.dispose();
     clipboardSubscription.dispose();
     notificationSubscription.dispose();
     terminal.dispose();
-  },
-  { once: true }
-);
+  }
+});
+
+window.addEventListener('pageshow', (event) => {
+  if (!event.persisted) return;
+  terminal.fit();
+  if (restoreTerminalFocus) terminal.focus();
+});
+// #endregion lifecycle
 
 function updatePtySize(cols: number, rows: number): void {
   console.info('Send terminal geometry to the PTY', { cols, rows });

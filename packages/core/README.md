@@ -46,8 +46,9 @@ terminal.focus();
 ```
 
 The default worker policy chooses a dedicated worker when `Worker` and `OffscreenCanvas` are
-available, with a main-thread fallback. The automatic renderer tries WebGPU, then WebGL2, then
-Canvas 2D for cell backgrounds. Browser Canvas 2D shapes text on every renderer path. Releases run
+available, with a main-thread retry if worker startup fails. The automatic renderer tries WebGPU,
+then WebGL2, then Canvas 2D for cell backgrounds, and moves down that ladder when an accelerated
+backend cannot recover at runtime. Browser Canvas 2D shapes text on every renderer path. Releases run
 the complete browser suite in Chromium and focused API compatibility tests in Firefox and WebKit;
 hardware WebGPU availability is not required because the renderer falls back automatically.
 

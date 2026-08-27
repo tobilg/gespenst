@@ -1,0 +1,43 @@
+{
+  "name": "@gespenst/shell",
+  "version": "0.1.0",
+  "description": "Portable browser Bash facade for gespenst powered by BashKit",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tobilg/gespenst.git",
+    "directory": "packages/shell"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@gespenst/core": "^0.1.0"
+  },
+  "dependencies": {
+    "@gespenst/bashkit": "workspace:*"
+  },
+  "devDependencies": {
+    "@gespenst/core": "workspace:*"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

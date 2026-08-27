@@ -16,7 +16,7 @@ import type { RendererInfo, RendererPreference, RenderMetrics } from './renderer
 import type { TerminalFontFace } from './types.js';
 
 /** Version of the internal main-thread/worker message protocol. */
-export const TERMINAL_PROTOCOL_VERSION = 6 as const;
+export const TERMINAL_PROTOCOL_VERSION = 7 as const;
 
 type WorkerWasmSource = Exclude<WasmSource, Response | URL>;
 
@@ -39,14 +39,14 @@ export interface WorkerInitOptions extends CoreTerminalOptions {
   readonly accessibility: boolean;
   readonly allowTransparency: boolean;
   readonly minimumContrastRatio: number;
-  readonly backgroundCanvas: OffscreenCanvas;
+  readonly backgroundCanvases: readonly OffscreenCanvas[];
   readonly textCanvas: OffscreenCanvas;
   readonly wasm?: WorkerWasmSource;
   readonly callbacksWasm?: WorkerWasmSource;
 }
 
 export type MainToWorkerPayload =
-  | { readonly type: 'init'; readonly version: 6; readonly options: WorkerInitOptions }
+  | { readonly type: 'init'; readonly version: 7; readonly options: WorkerInitOptions }
   | { readonly type: 'write'; readonly data: ArrayBuffer; readonly requestId?: number }
   | {
       readonly type: 'resize';
@@ -103,7 +103,16 @@ export type WorkerEventName =
   | 'clipboardWrite';
 
 export type WorkerToMainPayload =
-  | { readonly type: 'ready'; readonly renderer: RendererInfo }
+  | {
+      readonly type: 'ready';
+      readonly renderer: RendererInfo;
+      readonly surfaceIndex: number;
+    }
+  | {
+      readonly type: 'renderer';
+      readonly renderer: RendererInfo;
+      readonly surfaceIndex: number;
+    }
   | { readonly type: 'input'; readonly data: ArrayBuffer; readonly source: string }
   | { readonly type: 'event'; readonly name: WorkerEventName; readonly value: unknown }
   | { readonly type: 'a11y'; readonly rows: readonly string[] }

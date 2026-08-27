@@ -303,6 +303,11 @@ h1 {
   background: var(--terminal-canvas, #1d1f21);
 }
 
+/* Reveal the initial banner and interpreter prompt together after the portable shell is ready. */
+.docs-shell-starting .gespenst__canvas {
+  visibility: hidden;
+}
+
 .terminal-error {
   position: absolute;
   inset: 46px 0 0;

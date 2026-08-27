@@ -82,6 +82,24 @@ describe('HybridRenderer', () => {
     ).rejects.toThrow('WebGPU is unavailable');
   });
 
+  it('uses independent surfaces while selecting the automatic initialization ladder', async () => {
+    vi.stubGlobal('navigator', {});
+    const webgpu = fakeCanvas({});
+    const webgl = fakeCanvas({ webgl2: null });
+    const canvas = fakeCanvas({ '2d': fake2dContext().value });
+    const renderer = await HybridRenderer.create(
+      [webgpu.canvas, webgl.canvas, canvas.canvas],
+      fakeCanvas({ '2d': fake2dContext().value }).canvas,
+      metrics,
+      'auto'
+    );
+
+    expect(renderer.info.backend).toBe('canvas2d');
+    expect(renderer.surfaceIndex).toBe(2);
+    expect(webgl.canvas.getContext).toHaveBeenCalledWith('webgl2', expect.any(Object));
+    renderer.dispose();
+  });
+
   it('initializes WebGPU, draws, resizes, restores a lost device, and disposes', async () => {
     const first = fakeWebGpuDevice();
     const second = fakeWebGpuDevice();
@@ -104,6 +122,8 @@ describe('HybridRenderer', () => {
       'webgpu',
       true
     );
+    const changes: Array<{ backend: string; surface: number }> = [];
+    renderer.onRendererChange((info, surface) => changes.push({ backend: info.backend, surface }));
 
     expect(renderer.info.backend).toBe('webgpu');
     expect(gpuContext.configure).toHaveBeenLastCalledWith({
@@ -133,10 +153,77 @@ describe('HybridRenderer', () => {
       format: 'bgra8unorm',
       alphaMode: 'premultiplied',
     });
+    expect(changes).toEqual([{ backend: 'webgpu', surface: 0 }]);
 
     renderer.dispose();
     expect(second.bufferDestroy).toHaveBeenCalled();
     expect(second.deviceDestroy).toHaveBeenCalledOnce();
+  });
+
+  it('falls from WebGPU to WebGL2 when the one-shot device recovery fails', async () => {
+    const device = fakeWebGpuDevice();
+    const requestAdapter = vi
+      .fn()
+      .mockResolvedValueOnce({ requestDevice: async () => device.value })
+      .mockResolvedValueOnce(null);
+    vi.stubGlobal('navigator', {
+      gpu: {
+        requestAdapter,
+        getPreferredCanvasFormat: vi.fn(() => 'bgra8unorm'),
+      },
+    });
+    const gpu = fakeCanvas({ webgpu: fakeWebGpuContext().value });
+    const gl = fakeWebGl();
+    const webgl = fakeCanvas({ webgl2: gl.value });
+    const canvas = fakeCanvas({ '2d': fake2dContext().value });
+    const renderer = await HybridRenderer.create(
+      [gpu.canvas, webgl.canvas, canvas.canvas],
+      fakeCanvas({ '2d': fake2dContext().value }).canvas,
+      metrics,
+      'auto'
+    );
+    const changes: Array<{ backend: string; surface: number }> = [];
+    renderer.onRendererChange((info, surface) => changes.push({ backend: info.backend, surface }));
+    renderer.render(snapshot([cell(0, 'before')]));
+
+    device.lose();
+
+    await vi.waitFor(() => expect(renderer.info.backend).toBe('webgl2'));
+    expect(renderer.surfaceIndex).toBe(1);
+    expect(changes).toContainEqual({ backend: 'webgl2', surface: 1 });
+    expect(gl.drawArrays).toHaveBeenCalled();
+    expect(device.deviceDestroy).toHaveBeenCalled();
+    renderer.dispose();
+  });
+
+  it('keeps explicit WebGPU strict when runtime recovery fails', async () => {
+    const device = fakeWebGpuDevice();
+    const requestAdapter = vi
+      .fn()
+      .mockResolvedValueOnce({ requestDevice: async () => device.value })
+      .mockResolvedValueOnce(null);
+    vi.stubGlobal('navigator', {
+      gpu: {
+        requestAdapter,
+        getPreferredCanvasFormat: vi.fn(() => 'bgra8unorm'),
+      },
+    });
+    const renderer = await HybridRenderer.create(
+      fakeCanvas({ webgpu: fakeWebGpuContext().value }).canvas,
+      fakeCanvas({ '2d': fake2dContext().value }).canvas,
+      metrics,
+      'webgpu'
+    );
+    const failures: Error[] = [];
+    renderer.onRendererError((error) => failures.push(error));
+    renderer.render(snapshot([cell(0, 'before')]));
+
+    device.lose();
+
+    await vi.waitFor(() => expect(failures).toHaveLength(1));
+    expect(failures[0]?.message).toContain('could not recover');
+    expect(() => renderer.render(snapshot([cell(0, 'after')]))).toThrow('could not recover');
+    renderer.dispose();
   });
 
   it('uses an opaque WebGPU surface when transparency is disabled', async () => {
@@ -180,10 +267,58 @@ describe('HybridRenderer', () => {
 
     background.target.dispatchEvent(new Event('webglcontextrestored'));
     expect(gl.viewport).toHaveBeenCalledWith(0, 0, metrics.width, metrics.height);
-    expect(gl.drawArrays.mock.calls.length).toBeGreaterThan(draws);
+    await vi.waitFor(() => expect(gl.drawArrays.mock.calls.length).toBeGreaterThan(draws));
     renderer.dispose();
     expect(gl.deleteBuffer).toHaveBeenCalled();
     expect(gl.deleteProgram).toHaveBeenCalled();
+  });
+
+  it('falls from WebGL2 to Canvas 2D after the restoration timeout', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('navigator', {});
+    const gl = fakeWebGl();
+    const webgl = fakeCanvas({ webgl2: gl.value });
+    const canvasContext = fake2dContext();
+    const canvas = fakeCanvas({ '2d': canvasContext.value });
+    const renderer = await HybridRenderer.create(
+      [webgl.canvas, canvas.canvas],
+      fakeCanvas({ '2d': fake2dContext().value }).canvas,
+      metrics,
+      'webgl2'
+    );
+    renderer.render(snapshot([cell(0, 'before')]));
+    webgl.target.dispatchEvent(new Event('webglcontextlost', { cancelable: true }));
+    const rendered = renderer.render(snapshot([cell(0, 'after')]));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await rendered;
+
+    expect(renderer.info.backend).toBe('canvas2d');
+    expect(renderer.surfaceIndex).toBe(1);
+    expect(canvasContext.fillRect).toHaveBeenCalled();
+    renderer.dispose();
+  });
+
+  it('settles an in-flight restoration when the renderer is disposed', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('navigator', {});
+    const webgl = fakeCanvas({ webgl2: fakeWebGl().value });
+    const renderer = await HybridRenderer.create(
+      [webgl.canvas, fakeCanvas({ '2d': fake2dContext().value }).canvas],
+      fakeCanvas({ '2d': fake2dContext().value }).canvas,
+      metrics,
+      'webgl2'
+    );
+    renderer.render(snapshot([cell(0, 'before')]));
+    webgl.target.dispatchEvent(new Event('webglcontextlost', { cancelable: true }));
+    const recovery = renderer.render(snapshot([cell(0, 'after')]));
+
+    renderer.dispose();
+
+    await expect(recovery).resolves.toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(webgl.canvas.width).toBe(1);
+    expect(webgl.canvas.height).toBe(1);
   });
 });
 

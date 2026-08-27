@@ -38,11 +38,8 @@ the `docs-site-<tag>` artifact, and the `deploy-docs` job in `release.yml` publi
 artifact after npm publication succeeds, so the site is never built a second time and can only go
 live from a release that already passed the full suite.
 
-The deployment root includes `apps/docs/public/_headers`, which sends
-`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. The live
-demo runs a WASIX shell, so the page must be cross-origin isolated; without those headers the
-bundled `coi-serviceworker` fallback reloads the page on first visit. Keep the file in step with the
-`server` and `preview` headers in `apps/docs/vite.config.ts`.
+The deployment root includes `apps/docs/public/_headers` with the site's security and cache policy.
+The browser-only demo needs no server process, service-worker bootstrap, or cross-origin isolation.
 
 ### One-time setup
 

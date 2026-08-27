@@ -4,10 +4,12 @@
   "commit": false,
   "fixed": [
     [
+      "@gespenst/bashkit",
       "@gespenst/core",
       "@gespenst/clipboard",
       "@gespenst/xterm",
       "@gespenst/search",
+      "@gespenst/shell",
       "@gespenst/web-links",
       "@gespenst/websocket",
       "@gespenst/web-fonts",
@@ -15,7 +17,6 @@
       "@gespenst/react",
       "@gespenst/vue",
       "@gespenst/svelte",
-      "@gespenst/wasmer",
       "@gespenst/themes"
     ]
   ],

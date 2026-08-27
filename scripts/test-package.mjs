@@ -27,6 +27,14 @@ function exportedFiles(value) {
 
 const noticeMarkers = new Map([
   [
+    '@gespenst/bashkit',
+    [
+      'Copyright (c) 2024-2026 Everruns',
+      'Permission is hereby granted, free of charge',
+      'THE SOFTWARE IS PROVIDED "AS IS"',
+    ],
+  ],
+  [
     '@gespenst/core',
     [
       'Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors',
@@ -101,6 +109,9 @@ try {
       ]) {
         required.add(file);
       }
+    }
+    if (manifest.name === '@gespenst/bashkit') {
+      required.add('package/THIRD_PARTY_NOTICES.md');
     }
     if (manifest.name === '@gespenst/xterm') {
       required.add('package/dist/xterm.css');
@@ -280,7 +291,7 @@ function declarationEntrySpecifiers(manifest) {
 async function verifyPackedBrowser(consumerRoot) {
   await writeFile(
     resolve(consumerRoot, 'index.html'),
-    '<!doctype html><html><body><div id="native"></div><div id="xterm"></div><script type="module" src="/index.js"></script></body></html>\n'
+    '<!doctype html><html><body><div id="native"></div><div id="shell"></div><div id="xterm"></div><script type="module" src="/index.js"></script></body></html>\n'
   );
   await writeFile(resolve(consumerRoot, 'index.js'), browserFixture());
   const output = resolve(consumerRoot, 'dist');
@@ -342,12 +353,20 @@ async function verifyPackedBrowser(consumerRoot) {
     if (result.canvasPosition !== 'absolute' || result.textareaOpacity !== '0') {
       throw new Error(`Packed terminal CSS was not applied: ${JSON.stringify(result)}`);
     }
-    if (result.nativeChildren !== 0 || result.xtermChildren !== 0) {
+    if (
+      result.shellBackend !== 'bashkit' ||
+      !result.shellText.includes('package $ ') ||
+      result.shellStatus !== 'disposed'
+    ) {
+      throw new Error(`Packed browser-shell addon failed: ${JSON.stringify(result)}`);
+    }
+    if (result.nativeChildren !== 0 || result.shellChildren !== 0 || result.xtermChildren !== 0) {
       throw new Error('Packed terminal disposal left owned DOM behind');
     }
     if (workers.length === 0) throw new Error('Packed default terminal did not start a worker');
-    if (wasmResponses.length < 2)
-      throw new Error('Packed terminal did not request both WASM assets');
+    if (wasmResponses.length < 3 || !wasmResponses.some(({ url }) => url.includes('bashkit'))) {
+      throw new Error('Packed terminal did not request the core and BashKit WASM assets');
+    }
     for (const response of wasmResponses) {
       if (response.status !== 200 || !response.type?.startsWith('application/wasm')) {
         throw new Error(`Invalid WASM response: ${JSON.stringify(response)}`);
@@ -358,7 +377,7 @@ async function verifyPackedBrowser(consumerRoot) {
     await browser.close();
     await server.close();
   }
-  console.log('Packed core and xterm passed their Chromium consumer smoke test');
+  console.log('Packed core, browser shell, and xterm passed their Chromium consumer smoke test');
 }
 
 async function verifyInstalledEntries(consumerRoot, names) {
@@ -379,13 +398,15 @@ function browserFixture() {
 import { createTerminal } from '@gespenst/core';
 import '@gespenst/core/style.css';
 import { ClipboardAddon } from '@gespenst/clipboard';
+import { BrowserShellAddon } from '@gespenst/shell';
 import { Terminal } from '@gespenst/xterm';
 import '@gespenst/xterm/css/xterm.css';
 
 globalThis.__gespenstPackedTest = (async () => {
   const nativeHost = document.querySelector('#native');
+  const shellHost = document.querySelector('#shell');
   const xtermHost = document.querySelector('#xterm');
-  for (const host of [nativeHost, xtermHost]) {
+  for (const host of [nativeHost, shellHost, xtermHost]) {
     host.style.width = '480px';
     host.style.height = '240px';
   }
@@ -415,6 +436,18 @@ globalThis.__gespenstPackedTest = (async () => {
   const canvasPosition = getComputedStyle(native.element.querySelector('.gespenst__canvas')).position;
   const textareaOpacity = getComputedStyle(native.element.querySelector('textarea')).opacity;
 
+  const shellTerminal = await createTerminal({
+    container: shellHost,
+    cols: 32,
+    rows: 6,
+    renderer: 'auto',
+    worker: false,
+  });
+  const browserShell = new BrowserShellAddon({ bashkit: { prompt: 'package $ ' } });
+  shellTerminal.loadAddon(browserShell);
+  const shellReady = await browserShell.ready;
+  const shellText = await waitForText(shellTerminal, 'package $ ');
+
   const xterm = new Terminal({ cols: 32, rows: 6 });
   xterm.open(xtermHost);
   await xterm.ready;
@@ -422,6 +455,7 @@ globalThis.__gespenstPackedTest = (async () => {
   const xtermText = xterm.buffer.active.getLine(0)?.translateToString(true) ?? '';
   xterm.resize(40, 8);
   native.dispose();
+  shellTerminal.dispose();
   xterm.dispose();
   return {
     nativeText,
@@ -432,10 +466,24 @@ globalThis.__gespenstPackedTest = (async () => {
     rows: 8,
     canvasPosition,
     textareaOpacity,
+    shellBackend: shellReady.backend,
+    shellText,
+    shellStatus: browserShell.status,
     nativeChildren: nativeHost.childElementCount,
+    shellChildren: shellHost.childElementCount,
     xtermChildren: xtermHost.childElementCount,
   };
 })();
+
+async function waitForText(terminal, text) {
+  const deadline = performance.now() + 5000;
+  while (performance.now() < deadline) {
+    const content = (await terminal.readBuffer()).rows.map((row) => row.text).join('\\n');
+    if (content.includes(text)) return content;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Packed browser shell did not render its prompt');
+}
 `;
 }
 

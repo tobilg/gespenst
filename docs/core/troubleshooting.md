@@ -57,11 +57,21 @@ apply the adapter's documented line discipline rather than changing renderer beh
 Send `terminal.geometry` when the session opens and subscribe to `resize`. Forward `cols` and `rows`
 as a control message that your PTY backend validates and applies.
 
+## A browser-shell command is unavailable
+
+`@gespenst/shell` uses BashKit's single-process interpreter and curated built-in command set. It is
+not a Linux VM, so arbitrary native executables, system packages, job control, and child processes
+are intentionally unavailable. Inspect `ready.session.capabilities` and use its virtual filesystem
+APIs for browser-native workflows. Connect `@gespenst/websocket` to a real server-side PTY when
+users need unrestricted operating-system commands.
+
 ## Rendering is slower than expected
 
 Read `terminal.renderer.backend` rather than assuming WebGPU was selected. Check output chunk sizes,
 string conversion, scrollback, full accessibility mirroring, snapshot frequency, and main-thread
-work. Compare configurations with the same workload and browser conditions.
+work. The value is live and may move from WebGPU to WebGL2 or Canvas 2D after recovery fails;
+subscribe to the `renderer` event when diagnostics need to record that transition. Compare
+configurations with the same workload and browser conditions.
 
 See [Performance](./performance.md) for a measurement checklist.
 

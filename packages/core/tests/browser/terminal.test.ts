@@ -96,6 +96,39 @@ describe('browser terminal', () => {
     connection.dispose();
   });
 
+  it('falls from WebGL2 to Canvas 2D at runtime without losing terminal state', async () => {
+    const terminal = await createTerminal({
+      container: container(),
+      cols: 80,
+      rows: 8,
+      worker: false,
+      renderer: 'webgl2',
+    });
+    terminals.push(terminal);
+    await terminal.writeAsync('retained across renderer fallback');
+    const connection = terminal.connect({
+      readable: new ReadableStream(),
+      writable: new WritableStream(),
+    });
+    const rendererEvents: string[] = [];
+    terminal.on('renderer', ({ backend }) => rendererEvents.push(backend));
+    const activeBackground = [
+      ...terminal.element.querySelectorAll<HTMLCanvasElement>('.gespenst__background'),
+    ].find((canvas) => canvas.style.display !== 'none');
+    if (!activeBackground) throw new Error('Expected an active renderer background');
+
+    activeBackground.dispatchEvent(new Event('webglcontextlost', { cancelable: true }));
+    await terminal.writeAsync(' after loss');
+
+    expect(terminal.renderer.backend).toBe('canvas2d');
+    expect(rendererEvents).toContain('canvas2d');
+    expect((await terminal.readBuffer()).rows.map((row) => row.text).join('\n')).toContain(
+      'retained across renderer fallback'
+    );
+    expect(connection.status).toBe('open');
+    connection.dispose();
+  });
+
   it('exposes geometry and emits changes after container resizing', async () => {
     const host = container();
     const terminal = await createTerminal({
@@ -312,6 +345,53 @@ describe('browser terminal', () => {
     expect(input).toEqual(['日本']);
   });
 
+  it('encodes Return from an iOS-style code-less keydown', async () => {
+    const terminal = await createTerminal({
+      container: container(),
+      worker: false,
+      renderer: 'canvas2d',
+    });
+    terminals.push(terminal);
+    const input: string[] = [];
+    terminal.on('input', ({ data }) => input.push(new TextDecoder().decode(data)));
+    const textarea = terminal.element.querySelector('textarea');
+    if (!textarea) throw new Error('Expected terminal textarea');
+
+    textarea.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', code: '', bubbles: true, cancelable: true })
+    );
+
+    expect(input).toEqual(['\r']);
+  });
+
+  it('normalizes a virtual-keyboard textarea line break to terminal Enter', async () => {
+    const terminal = await createTerminal({
+      container: container(),
+      worker: false,
+      renderer: 'canvas2d',
+    });
+    terminals.push(terminal);
+    const input: string[] = [];
+    terminal.on('input', ({ data, source }) => {
+      if (source === 'text') input.push(new TextDecoder().decode(data));
+    });
+    const textarea = terminal.element.querySelector('textarea');
+    if (!textarea) throw new Error('Expected terminal textarea');
+
+    textarea.value = '\n';
+    textarea.dispatchEvent(
+      new InputEvent('input', {
+        bubbles: true,
+        cancelable: false,
+        data: null,
+        inputType: 'insertLineBreak',
+      })
+    );
+
+    expect(input).toEqual(['\r']);
+    expect(textarea.value).toBe('');
+  });
+
   it('accepts equal cloned byte sources in a shared worker', async () => {
     const [wasm, callbacks] = await Promise.all([
       fetch(new URL('../../src/assets/ghostty-vt.wasm', import.meta.url)).then((value) =>
@@ -409,6 +489,7 @@ describe('browser terminal', () => {
               terminalId: message.terminalId,
               type: 'ready',
               renderer: { backend: 'canvas2d', textShaping: 'browser-canvas' },
+              surfaceIndex: 0,
             },
           });
         });
@@ -432,6 +513,55 @@ describe('browser terminal', () => {
 
     await expect(snapshot).rejects.toThrow('worker crashed');
     await expect(terminal.readViewport()).rejects.toThrow('worker crashed');
+  });
+
+  it('recreates transferred canvases and starts locally when a dedicated worker cannot start', async () => {
+    class StartupFailingWorker {
+      static readonly terminate = vi.fn();
+      private readonly listeners = new Map<string, Set<(event: never) => void>>();
+
+      addEventListener(type: string, listener: (event: never) => void): void {
+        const listeners = this.listeners.get(type) ?? new Set();
+        listeners.add(listener);
+        this.listeners.set(type, listeners);
+      }
+
+      removeEventListener(type: string, listener: (event: never) => void): void {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      postMessage(message: { type: string }): void {
+        if (message.type !== 'init') return;
+        queueMicrotask(() =>
+          this.dispatch('error', {
+            error: new Error('worker initialization failed'),
+            message: 'worker initialization failed',
+          })
+        );
+      }
+
+      terminate(): void {
+        StartupFailingWorker.terminate();
+      }
+
+      private dispatch(type: string, event: unknown): void {
+        for (const listener of this.listeners.get(type) ?? []) listener(event as never);
+      }
+    }
+    vi.stubGlobal('Worker', StartupFailingWorker);
+
+    const terminal = await createTerminal({
+      container: container(),
+      worker: 'dedicated',
+      renderer: 'canvas2d',
+    });
+    terminals.push(terminal);
+    await terminal.writeAsync('local retry works');
+
+    expect(StartupFailingWorker.terminate).toHaveBeenCalledOnce();
+    expect(terminal.renderer.backend).toBe('canvas2d');
+    expect((await terminal.readViewport()).viewportRows[0]?.text).toContain('local retry works');
+    expect(terminal.element.querySelectorAll('.gespenst__canvas')).toHaveLength(2);
   });
 
   it('normalizes pixel, line, and page wheel deltas with fractional accumulation', async () => {

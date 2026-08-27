@@ -200,6 +200,9 @@ export class TerminalWorkerHost {
     } else if (message.type === 'dispose') {
       session.clipboardRegistration?.dispose();
       for (const face of session.fontFaces) this.scope.fonts?.delete(face);
+      for (const waiter of session.renderWaiters.splice(0))
+        waiter.reject(new Error('Terminal disposed'));
+      session.renderPending = false;
       session.renderer.dispose();
       terminal.dispose();
       this.sessions.delete(session.id);
@@ -225,7 +228,7 @@ export class TerminalWorkerHost {
       const activeRuntime = await this.getRuntime(message.options);
       terminal = activeRuntime.createTerminal(message.options);
       const renderer = await this.dependencies.createRenderer(
-        message.options.backgroundCanvas,
+        message.options.backgroundCanvases,
         message.options.textCanvas,
         message.options.metrics,
         message.options.renderer,
@@ -243,10 +246,18 @@ export class TerminalWorkerHost {
         fontFaces: [],
         clipboardRegistration: null,
       };
+      renderer.onRendererChange((info, surfaceIndex) =>
+        this.post(session.id, { type: 'renderer', renderer: info, surfaceIndex })
+      );
+      renderer.onRendererError((error) => this.reportError(session.id, error));
       terminal = null;
       this.sessions.set(session.id, session);
       this.forwardEvents(session);
-      this.post(session.id, { type: 'ready', renderer: renderer.info });
+      this.post(session.id, {
+        type: 'ready',
+        renderer: renderer.info,
+        surfaceIndex: renderer.surfaceIndex,
+      });
       void this.scheduleRender(session);
     } finally {
       terminal?.dispose();
@@ -295,15 +306,22 @@ export class TerminalWorkerHost {
     void rendered.catch(() => undefined);
     if (session.renderPending) return rendered;
     session.renderPending = true;
-    const run = () => {
-      session.renderPending = false;
+    const run = async () => {
       if (!this.sessions.has(session.id)) {
+        session.renderPending = false;
         for (const waiter of session.renderWaiters.splice(0)) waiter.resolve();
         return;
       }
       try {
-        const frame = session.terminal.render();
-        session.renderer.render(frame);
+        while (true) {
+          const waiterCount = session.renderWaiters.length;
+          const frame = session.terminal.render();
+          await session.renderer.render(frame);
+          if (!this.sessions.has(session.id)) return;
+          if (session.renderWaiters.length === waiterCount) break;
+        }
+        const waiters = session.renderWaiters.splice(0);
+        session.renderPending = false;
         const state = session.terminal.bufferState();
         this.post(session.id, { type: 'rendered', state });
         if (session.accessibility) {
@@ -313,17 +331,19 @@ export class TerminalWorkerHost {
             rows: viewport.viewportRows.map((row) => row.text),
           });
         }
+        for (const waiter of waiters) waiter.resolve();
       } catch (error) {
+        if (!this.sessions.has(session.id)) return;
         const failure = error instanceof Error ? error : new Error(String(error));
-        for (const waiter of session.renderWaiters.splice(0)) waiter.reject(failure);
+        const waiters = session.renderWaiters.splice(0);
+        session.renderPending = false;
+        for (const waiter of waiters) waiter.reject(failure);
         this.reportError(session.id, failure);
-        return;
       }
-      for (const waiter of session.renderWaiters.splice(0)) waiter.resolve();
     };
     if (typeof this.scope.requestAnimationFrame === 'function')
-      this.scope.requestAnimationFrame(run);
-    else queueMicrotask(run);
+      this.scope.requestAnimationFrame(() => void run());
+    else queueMicrotask(() => void run());
     return rendered;
   }
 

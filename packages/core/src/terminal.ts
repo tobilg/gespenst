@@ -37,7 +37,13 @@ import {
   type WorkerInitOptions,
   type WorkerToMainMessage,
 } from './protocol.js';
-import { HybridRenderer, type RendererInfo, type RenderMetrics } from './renderers/hybrid.js';
+import {
+  HybridRenderer,
+  type RendererInfo,
+  type RendererPreference,
+  type RenderMetrics,
+  rendererSurfaceCount,
+} from './renderers/hybrid.js';
 import type {
   BrowserTerminal,
   BrowserTerminalEventMap,
@@ -56,6 +62,7 @@ interface BackendEvents {
   event(name: WorkerEventName, value: unknown): void;
   a11y(rows: readonly string[]): void;
   rendered(state: TerminalBufferState): void;
+  renderer(info: RendererInfo): void;
   error(error: Error): void;
 }
 
@@ -93,8 +100,8 @@ interface Backend {
 
 interface TerminalDom {
   readonly root: HTMLDivElement;
-  readonly background: HTMLCanvasElement;
-  readonly text: HTMLCanvasElement;
+  backgrounds: HTMLCanvasElement[];
+  text: HTMLCanvasElement;
   readonly input: HTMLTextAreaElement;
   readonly a11y: HTMLDivElement;
 }
@@ -203,7 +210,7 @@ function cloneSafeWasmSource(
 }
 
 class WorkerBackend implements Backend {
-  readonly renderer: RendererInfo;
+  private rendererValue: RendererInfo;
   private nextRequest = 1;
   private failure: Error | null = null;
   private disposed = false;
@@ -214,6 +221,7 @@ class WorkerBackend implements Backend {
   private readonly worker: Worker;
   private readonly terminalId: number;
   private readonly releaseWorker: () => void;
+  private readonly dom: TerminalDom;
   private readonly onMessage: (event: MessageEvent<WorkerToMainMessage>) => void;
   private readonly onError: (event: ErrorEvent) => void;
 
@@ -221,12 +229,14 @@ class WorkerBackend implements Backend {
     worker: Worker,
     terminalId: number,
     renderer: RendererInfo,
+    dom: TerminalDom,
     releaseWorker: () => void,
     events: BackendEvents
   ) {
     this.worker = worker;
     this.terminalId = terminalId;
-    this.renderer = renderer;
+    this.rendererValue = renderer;
+    this.dom = dom;
     this.releaseWorker = releaseWorker;
     this.onMessage = (event) => {
       if (event.data.terminalId === terminalId) this.receive(event.data, events);
@@ -255,38 +265,42 @@ class WorkerBackend implements Backend {
       wasm,
       callbacksWasm
     );
-    const backgroundCanvas = dom.background.transferControlToOffscreen();
+    const backgroundCanvases = dom.backgrounds.map((canvas) => canvas.transferControlToOffscreen());
     const textCanvas = dom.text.transferControlToOffscreen();
-    const ready = new Promise<RendererInfo>((resolve, reject) => {
-      const cleanup = () => {
-        worker.removeEventListener('message', startup);
-        worker.removeEventListener('error', workerError);
-      };
-      const startup = (event: MessageEvent<WorkerToMainMessage>) => {
-        if (event.data.terminalId !== terminalId) return;
-        if (event.data.type === 'ready') {
+    let cleanupStartup: () => void = () => {};
+    const ready = new Promise<{ renderer: RendererInfo; surfaceIndex: number }>(
+      (resolve, reject) => {
+        const cleanup = () => {
+          worker.removeEventListener('message', startup);
+          worker.removeEventListener('error', workerError);
+        };
+        cleanupStartup = cleanup;
+        const startup = (event: MessageEvent<WorkerToMainMessage>) => {
+          if (event.data.terminalId !== terminalId) return;
+          if (event.data.type === 'ready') {
+            cleanup();
+            resolve({ renderer: event.data.renderer, surfaceIndex: event.data.surfaceIndex });
+          } else if (event.data.type === 'error') {
+            cleanup();
+            reject(new Error(event.data.message));
+          }
+        };
+        const workerError = (event: ErrorEvent) => {
           cleanup();
-          resolve(event.data.renderer);
-        } else if (event.data.type === 'error') {
-          cleanup();
-          reject(new Error(event.data.message));
-        }
-      };
-      const workerError = (event: ErrorEvent) => {
-        cleanup();
-        const cause = event.error;
-        if (cause instanceof Error && cause.message) reject(cause);
-        else reject(new Error(event.message || 'Terminal worker failed to load'));
-      };
-      worker.addEventListener('message', startup);
-      worker.addEventListener('error', workerError);
-    });
+          const cause = event.error;
+          if (cause instanceof Error && cause.message) reject(cause);
+          else reject(new Error(event.message || 'Terminal worker failed to load'));
+        };
+        worker.addEventListener('message', startup);
+        worker.addEventListener('error', workerError);
+      }
+    );
     const message: MainToWorkerPayload = {
       type: 'init',
       version: TERMINAL_PROTOCOL_VERSION,
       options: {
         runtimeKey,
-        backgroundCanvas,
+        backgroundCanvases,
         textCanvas,
         metrics: layout.metrics,
         renderer: options.renderer ?? 'auto',
@@ -309,18 +323,29 @@ class WorkerBackend implements Backend {
         ...(callbacksWasm === undefined ? {} : { callbacksWasm }),
       },
     };
-    worker.postMessage({ ...message, terminalId }, [backgroundCanvas, textCanvas]);
-    let renderer: RendererInfo;
     try {
-      renderer = await ready;
+      worker.postMessage({ ...message, terminalId }, [...backgroundCanvases, textCanvas]);
+    } catch (error) {
+      cleanupStartup();
+      release();
+      throw error;
+    }
+    let result: { renderer: RendererInfo; surfaceIndex: number };
+    try {
+      result = await ready;
     } catch (error) {
       release();
       throw error;
     }
-    const backend = new WorkerBackend(worker, terminalId, renderer, release, events);
+    activateBackgroundSurface(dom, result.surfaceIndex);
+    const backend = new WorkerBackend(worker, terminalId, result.renderer, dom, release, events);
     worker.addEventListener('message', backend.onMessage);
     worker.addEventListener('error', backend.onError);
     return backend;
+  }
+
+  get renderer(): RendererInfo {
+    return this.rendererValue;
   }
 
   write(data: Uint8Array): void {
@@ -484,7 +509,11 @@ class WorkerBackend implements Backend {
     else if (message.type === 'event') events.event(message.name, message.value);
     else if (message.type === 'a11y') events.a11y(message.rows);
     else if (message.type === 'rendered') events.rendered(message.state);
-    else if (message.type === 'selection') this.resolve(message.requestId, message.value);
+    else if (message.type === 'renderer') {
+      this.rendererValue = message.renderer;
+      activateBackgroundSurface(this.dom, message.surfaceIndex);
+      events.renderer(message.renderer);
+    } else if (message.type === 'selection') this.resolve(message.requestId, message.value);
     else if (message.type === 'snapshot') this.resolve(message.requestId, message.value);
     else if (message.type === 'viewport') this.resolve(message.requestId, message.value);
     else if (message.type === 'buffer') this.resolve(message.requestId, message.value);
@@ -545,8 +574,8 @@ class WorkerBackend implements Backend {
 }
 
 class LocalBackend implements Backend {
-  readonly renderer: RendererInfo;
   private renderPending = false;
+  private disposed = false;
   private readonly renderWaiters: Array<{
     readonly resolve: () => void;
     readonly reject: (error: Error) => void;
@@ -570,7 +599,6 @@ class LocalBackend implements Backend {
     this.painter = painter;
     this.events = events;
     this.accessibility = accessibility;
-    this.renderer = painter.info;
   }
 
   static async create(
@@ -597,14 +625,22 @@ class LocalBackend implements Backend {
         ? {}
         : { defaultCursorBlink: options.defaultCursorBlink }),
     });
-    const painter = await HybridRenderer.create(
-      dom.background,
-      dom.text,
-      layout.metrics,
-      options.renderer ?? 'auto',
-      options.allowTransparency ?? false,
-      options.minimumContrastRatio ?? 1
-    );
+    let painter: HybridRenderer;
+    try {
+      painter = await HybridRenderer.create(
+        dom.backgrounds,
+        dom.text,
+        layout.metrics,
+        options.renderer ?? 'auto',
+        options.allowTransparency ?? false,
+        options.minimumContrastRatio ?? 1
+      );
+    } catch (error) {
+      terminal.dispose();
+      runtime.dispose();
+      throw error;
+    }
+    activateBackgroundSurface(dom, painter.surfaceIndex);
     const backend = new LocalBackend(
       runtime,
       terminal,
@@ -612,6 +648,11 @@ class LocalBackend implements Backend {
       events,
       options.accessibility === 'full'
     );
+    painter.onRendererChange((info, surfaceIndex) => {
+      activateBackgroundSurface(dom, surfaceIndex);
+      events.renderer(info);
+    });
+    painter.onRendererError(events.error);
     terminal.on('input', ({ data, source }) => events.input(data, source));
     for (const name of [
       'bell',
@@ -626,6 +667,10 @@ class LocalBackend implements Backend {
     terminal.on('error', events.error);
     backend.scheduleRender();
     return backend;
+  }
+
+  get renderer(): RendererInfo {
+    return this.painter.info;
   }
 
   write(data: Uint8Array): void {
@@ -729,6 +774,9 @@ class LocalBackend implements Backend {
     this.scheduleRender();
   }
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.renderPending = false;
     for (const waiter of this.renderWaiters.splice(0))
       waiter.reject(new Error('Terminal disposed'));
     this.disableClipboard();
@@ -745,24 +793,38 @@ class LocalBackend implements Backend {
     void rendered.catch(() => undefined);
     if (this.renderPending) return rendered;
     this.renderPending = true;
-    requestAnimationFrame(() => {
-      this.renderPending = false;
-      try {
-        const frame = this.terminal.render();
-        this.painter.render(frame);
-        this.events.rendered(this.terminal.bufferState());
-        if (this.accessibility) {
-          const viewport = this.terminal.viewport();
-          this.events.a11y(viewport.viewportRows.map((row) => row.text));
-        }
-        for (const waiter of this.renderWaiters.splice(0)) waiter.resolve();
-      } catch (error) {
-        const failure = error instanceof Error ? error : new Error(String(error));
-        for (const waiter of this.renderWaiters.splice(0)) waiter.reject(failure);
-        this.events.error(failure);
-      }
-    });
+    requestAnimationFrame(() => void this.renderFrame());
     return rendered;
+  }
+
+  private async renderFrame(): Promise<void> {
+    if (this.disposed) return;
+    try {
+      while (true) {
+        const waiterCount = this.renderWaiters.length;
+        const frame = this.terminal.render();
+        await this.painter.render(frame);
+        if (this.disposed) return;
+        // A write may arrive while an asynchronous renderer recovery is in progress. Render the
+        // resulting damage before resolving any writeAsync() boundary that joined this frame.
+        if (this.renderWaiters.length === waiterCount) break;
+      }
+      const waiters = this.renderWaiters.splice(0);
+      this.renderPending = false;
+      this.events.rendered(this.terminal.bufferState());
+      if (this.accessibility) {
+        const viewport = this.terminal.viewport();
+        this.events.a11y(viewport.viewportRows.map((row) => row.text));
+      }
+      for (const waiter of waiters) waiter.resolve();
+    } catch (error) {
+      if (this.disposed) return;
+      const failure = error instanceof Error ? error : new Error(String(error));
+      const waiters = this.renderWaiters.splice(0);
+      this.renderPending = false;
+      for (const waiter of waiters) waiter.reject(failure);
+      this.events.error(failure);
+    }
   }
 }
 
@@ -784,8 +846,6 @@ class LocalBackend implements Backend {
 export class GespenstTerminal implements BrowserTerminal {
   /** Root DOM element owned by the terminal. */
   readonly element: HTMLElement;
-  /** Active renderer and shaping implementation. */
-  readonly renderer: RendererInfo;
   private readonly backend: Backend;
   private readonly dom: TerminalDom;
   private readonly options: TerminalOptions;
@@ -828,7 +888,6 @@ export class GespenstTerminal implements BrowserTerminal {
     };
     this.events = events;
     this.element = dom.root;
-    this.renderer = backend.renderer;
     this.applyInputFont();
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(dom.root);
@@ -869,6 +928,9 @@ export class GespenstTerminal implements BrowserTerminal {
         rendered(state) {
           terminal?.handleRendered(state);
         },
+        renderer(info) {
+          events.emit('renderer', info);
+        },
         error(error) {
           events.emit('error', error);
         },
@@ -877,9 +939,19 @@ export class GespenstTerminal implements BrowserTerminal {
         options.worker !== false &&
         typeof Worker !== 'undefined' &&
         'transferControlToOffscreen' in HTMLCanvasElement.prototype;
-      const backend = canUseWorker
-        ? await WorkerBackend.create(dom, layout, options, backendEvents)
-        : await LocalBackend.create(dom, layout, options, backendEvents);
+      let backend: Backend;
+      if (canUseWorker) {
+        try {
+          backend = await WorkerBackend.create(dom, layout, options, backendEvents);
+        } catch (error) {
+          if (options.worker === 'shared') throw error;
+          rebuildRenderingSurfaces(dom, options.renderer ?? 'auto');
+          applyCanvasLayout(dom, layout);
+          backend = await LocalBackend.create(dom, layout, options, backendEvents);
+        }
+      } else {
+        backend = await LocalBackend.create(dom, layout, options, backendEvents);
+      }
       terminal = new GespenstTerminal(dom, backend, layout, options, events);
       events.emit('renderer', backend.renderer);
       return terminal;
@@ -892,6 +964,11 @@ export class GespenstTerminal implements BrowserTerminal {
   /** Current character-grid and backing-surface geometry. */
   get geometry(): TerminalGeometry {
     return this.geometryValue;
+  }
+
+  /** Active renderer and shaping implementation. */
+  get renderer(): RendererInfo {
+    return this.backend.renderer;
   }
 
   /** Current authored theme. Missing values inherit from `DEFAULT_THEME`. */
@@ -1392,7 +1469,9 @@ export class GespenstTerminal implements BrowserTerminal {
         input.value = '';
         return;
       }
-      if (input.value) this.sendText(input.value);
+      // Mobile virtual keyboards may submit Return through textarea input instead of keydown.
+      // Terminal Enter is CR; forwarding the textarea's LF can leave non-PTY shells waiting.
+      if (input.value) this.sendText(normalizeTextareaInput(input.value));
       input.value = '';
     });
     listen(input, 'compositionend', (event) => {
@@ -1451,7 +1530,7 @@ export class GespenstTerminal implements BrowserTerminal {
     if (paste) return;
     const composed = composedCharacter(event);
     this.backend.key({
-      code: event.code || 'Unidentified',
+      code: keyboardCode(event),
       action: event.repeat ? 'repeat' : 'press',
       modifiers:
         composed === undefined
@@ -1563,8 +1642,7 @@ function buildDom(options: TerminalOptions): TerminalDom {
   root.className = 'gespenst';
   root.setAttribute('role', 'application');
   root.setAttribute('aria-label', options.ariaLabel ?? 'Terminal');
-  const background = ownerDocument.createElement('canvas');
-  background.className = 'gespenst__canvas gespenst__background';
+  const backgrounds = createBackgroundSurfaces(ownerDocument, options.renderer ?? 'auto');
   const text = ownerDocument.createElement('canvas');
   text.className = 'gespenst__canvas gespenst__text';
   const input = ownerDocument.createElement('textarea');
@@ -1577,8 +1655,47 @@ function buildDom(options: TerminalOptions): TerminalDom {
   a11y.className = 'gespenst__a11y';
   if ((options.accessibility ?? 'basic') === 'full') a11y.setAttribute('role', 'log');
   else a11y.setAttribute('aria-hidden', 'true');
-  root.append(background, text, input, a11y);
-  return { root, background, text, input, a11y };
+  root.append(...backgrounds, text, input, a11y);
+  return { root, backgrounds, text, input, a11y };
+}
+
+function createBackgroundSurfaces(
+  ownerDocument: Document,
+  preference: RendererPreference
+): HTMLCanvasElement[] {
+  return Array.from({ length: rendererSurfaceCount(preference) }, (_, index) => {
+    const canvas = ownerDocument.createElement('canvas');
+    canvas.className = 'gespenst__canvas gespenst__background';
+    canvas.width = 1;
+    canvas.height = 1;
+    canvas.style.display = index === 0 ? 'block' : 'none';
+    return canvas;
+  });
+}
+
+function activateBackgroundSurface(dom: TerminalDom, surfaceIndex: number): void {
+  for (let index = 0; index < dom.backgrounds.length; index += 1) {
+    const canvas = dom.backgrounds[index];
+    if (!canvas) continue;
+    if (index < surfaceIndex) {
+      canvas.style.display = 'none';
+      canvas.remove();
+    } else {
+      canvas.style.display = index === surfaceIndex ? 'block' : 'none';
+    }
+  }
+}
+
+function rebuildRenderingSurfaces(dom: TerminalDom, preference: RendererPreference): void {
+  const ownerDocument = dom.root.ownerDocument;
+  const backgrounds = createBackgroundSurfaces(ownerDocument, preference);
+  const text = ownerDocument.createElement('canvas');
+  text.className = 'gespenst__canvas gespenst__text';
+  for (const canvas of [...dom.backgrounds, dom.text]) canvas.remove();
+  dom.root.insertBefore(text, dom.input);
+  for (const background of backgrounds) dom.root.insertBefore(background, text);
+  dom.backgrounds = backgrounds;
+  dom.text = text;
 }
 
 function measure(dom: TerminalDom, options: TerminalOptions, fit = false): Layout {
@@ -1645,10 +1762,10 @@ function layoutForGrid(metrics: RenderMetrics, cols: number, rows: number): Layo
 }
 
 function applyCanvasLayout(dom: TerminalDom, layout: Layout, transferred = false): void {
-  for (const canvas of [dom.background, dom.text]) {
+  for (const canvas of [...dom.backgrounds, dom.text]) {
     canvas.style.width = `${layout.metrics.width / layout.metrics.devicePixelRatio}px`;
     canvas.style.height = `${layout.metrics.height / layout.metrics.devicePixelRatio}px`;
-    if (!transferred) {
+    if (!transferred && canvas === dom.text) {
       canvas.width = layout.metrics.width;
       canvas.height = layout.metrics.height;
     }
@@ -1675,6 +1792,37 @@ function sameGeometry(left: TerminalGeometry, right: TerminalGeometry): boolean 
     left.widthPx === right.widthPx &&
     left.heightPx === right.heightPx
   );
+}
+
+/** Normalizes textarea line breaks to the carriage return emitted by a terminal Enter key. */
+function normalizeTextareaInput(value: string): string {
+  return value.replace(/\r\n|\r|\n/gu, '\r');
+}
+
+/**
+ * Recovers named keys from virtual keyboards that populate `key` but leave physical `code` empty.
+ */
+function keyboardCode(event: KeyboardEvent): string {
+  if (event.code) return event.code;
+  switch (event.key) {
+    case 'Enter':
+    case 'Backspace':
+    case 'Tab':
+    case 'Escape':
+    case 'Delete':
+    case 'Insert':
+    case 'Home':
+    case 'End':
+    case 'PageUp':
+    case 'PageDown':
+    case 'ArrowUp':
+    case 'ArrowDown':
+    case 'ArrowLeft':
+    case 'ArrowRight':
+      return event.key;
+    default:
+      return 'Unidentified';
+  }
 }
 
 /**

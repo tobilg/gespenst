@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+      content="A high-performance TypeScript terminal with Ghostty VT and portable browser-only shells."
     />
     <!-- The page pins the landing palette's light surface in every theme. -->
     <meta name="theme-color" content="#f2f0ea" />
@@ -16,7 +16,7 @@
     <meta property="og:title" content="gespenst — Ghostty VT for the web" />
     <meta
       property="og:description"
-      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+      content="A high-performance TypeScript terminal with Ghostty VT and portable browser-only shells."
     />
     <meta property="og:image" content="%SITE_URL%/opengraph.png" />
     <meta property="og:image:type" content="image/png" />
@@ -27,14 +27,10 @@
     <meta name="twitter:title" content="gespenst — Ghostty VT for the web" />
     <meta
       name="twitter:description"
-      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+      content="A high-performance TypeScript terminal with Ghostty VT and portable browser-only shells."
     />
     <meta name="twitter:image" content="%SITE_URL%/opengraph.png" />
     <meta name="twitter:image:alt" content="The gespenst terminal toolkit: Ghostty VT running in the browser." />
-    <script>
-      window.coi = { quiet: true };
-    </script>
-    <script src="%BASE_URL%coi-serviceworker.min.js"></script>
     <title>gespenst — Transparent terminal example</title>
   </head>
   <body class="example-page">
@@ -62,9 +58,9 @@
         <p class="eyebrow">Example</p>
         <h1>A highly customizable terminal</h1>
         <p class="example-lede">
-          This is one real WASIX Bash session rendering black text on a nearly transparent surface,
-          so the grid behind it stays visible straight through the cells. Drag it by its title bar.
-          It is deliberately fixed in size.
+          This is one browser-only Bash session rendering black text on a nearly transparent
+          surface, so the grid behind it stays visible straight through the cells. Drag it by its
+          title bar. It is deliberately fixed in size.
         </p>
 
         <dl class="example-facts">

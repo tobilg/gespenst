@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "prepare:content": "pnpm --dir ../.. --filter @gespenst/core build && pnpm --dir ../.. --filter @gespenst/wasmer build && pnpm --dir ../.. docs:prepare",
+    "prepare:content": "pnpm --dir ../.. --filter @gespenst/shell... build && pnpm --dir ../.. docs:prepare",
     "predev": "pnpm run prepare:content",
     "dev": "node ../../scripts/vite-dev.mjs",
     "prebuild": "pnpm run prepare:content",
@@ -14,10 +14,8 @@
   "dependencies": {
     "@gespenst/clipboard": "workspace:*",
     "@gespenst/core": "workspace:*",
-    "@gespenst/themes": "workspace:*",
-    "@gespenst/wasmer": "workspace:*",
-    "@wasmer/sdk": "0.10.0",
-    "coi-serviceworker": "0.1.7"
+    "@gespenst/shell": "workspace:*",
+    "@gespenst/themes": "workspace:*"
   },
   "devDependencies": {
     "typescript": "catalog:",

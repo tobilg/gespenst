@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+      content="A high-performance TypeScript terminal with Ghostty VT and portable browser-only shells."
     />
     <meta name="theme-color" content="#f2f0ea" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#181a17" media="(prefers-color-scheme: dark)" />
@@ -16,7 +16,7 @@
     <meta property="og:title" content="gespenst — Ghostty VT for the web" />
     <meta
       property="og:description"
-      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+      content="A high-performance TypeScript terminal with Ghostty VT and portable browser-only shells."
     />
     <meta property="og:image" content="%SITE_URL%/opengraph.png" />
     <meta property="og:image:type" content="image/png" />
@@ -27,14 +27,10 @@
     <meta name="twitter:title" content="gespenst — Ghostty VT for the web" />
     <meta
       name="twitter:description"
-      content="A high-performance TypeScript terminal with Ghostty VT and browser-only WASIX shells."
+      content="A high-performance TypeScript terminal with Ghostty VT and portable browser-only shells."
     />
     <meta name="twitter:image" content="%SITE_URL%/opengraph.png" />
     <meta name="twitter:image:alt" content="The gespenst terminal toolkit: Ghostty VT running in the browser." />
-    <script>
-      window.coi = { quiet: true };
-    </script>
-    <script src="%BASE_URL%coi-serviceworker.min.js"></script>
     <title>gespenst — Ghostty VT for the web</title>
   </head>
   <body>
@@ -86,8 +82,8 @@
             <div id="terminal-error" class="terminal-error" hidden></div>
           </div>
           <p class="demo-hint">
-            A real Bash process compiled to WASIX, with coreutils on its PATH, running in this tab
-            with no backend.
+            A browser-only Bash session with a virtual filesystem, running in this tab with no
+            backend, PTY server, or cross-origin isolation requirement.
           </p>
         </div>
       </section>
@@ -110,8 +106,8 @@
         </div>
         <div>
           <strong>Shells without a server</strong>
-          <span>WASIX packages run in the page, so a working shell needs no PTY host and no
-            deployment.</span>
+          <span>Browser shell runtimes run in the page, so a working shell needs no PTY host or
+            backend deployment.</span>
         </div>
       </section>
 
@@ -198,9 +194,9 @@
           <div class="architecture-flow-track">
             <div class="flow-node">
               <span class="flow-label">Process</span>
-              <h3>PTY or WASIX</h3>
+              <h3>PTY or browser WASM</h3>
               <p>Run a server shell or a browser-only package.</p>
-              <code>node-pty | @gespenst/wasmer</code>
+              <code>node-pty | @gespenst/shell</code>
             </div>
             <div class="flow-node">
               <span class="flow-label">Transport</span>
@@ -282,12 +278,12 @@
                 >
                 <code>@gespenst/websocket</code>
               </a>
-              <a href="%BASE_URL%api/modules/_gespenst_wasmer.index.html">
+              <a href="%BASE_URL%api/modules/_gespenst_shell.index.html">
                 <span
                   ><strong>Browser-only shell</strong
-                  ><small>WASIX process and virtual filesystem</small></span
+                  ><small>Stateful BashKit with no server</small></span
                 >
-                <code>@gespenst/wasmer</code>
+                <code>@gespenst/shell</code>
               </a>
               <a href="%BASE_URL%api/documents/Core_Guide.Migrating_from_xterm.js.html">
                 <span
@@ -380,9 +376,15 @@
                 </a>
               </li>
               <li>
-                <a href="%BASE_URL%api/modules/_gespenst_wasmer.index.html">
-                  <code>@gespenst/wasmer</code>
-                  <small>Browser-only WASIX shells and filesystems</small>
+                <a href="%BASE_URL%api/modules/_gespenst_shell.index.html">
+                  <code>@gespenst/shell</code>
+                  <small>Stable portable Bash facade powered by BashKit</small>
+                </a>
+              </li>
+              <li>
+                <a href="%BASE_URL%api/modules/_gespenst_bashkit.index.html">
+                  <code>@gespenst/bashkit</code>
+                  <small>Single-process Bash without browser isolation</small>
                 </a>
               </li>
               <li>
@@ -538,11 +540,14 @@
           <h2>Project</h2>
           <a href="https://github.com/tobilg/gespenst">GitHub</a>
           <a href="https://github.com/tobilg/gespenst/issues">Issues</a>
+          <a href="https://github.com/tobilg/gespenst/blob/main/THIRD_PARTY_NOTICES.md"
+            >Third-party notices</a
+          >
           <a href="https://ghostty.org">Ghostty</a>
         </div>
       </div>
       <div class="footer-baseline">
-        <span>MIT licensed</span>
+        <span>MIT licensed · third-party demo runtime disclosed above</span>
       </div>
     </footer>
     <script type="module" src="/src/main.ts"></script>

@@ -28,8 +28,10 @@ before the terminal boundary.
 `write()` queues work and returns immediately. It is appropriate when an upstream transport already
 has a bounded queue and no parse boundary is needed.
 
-`writeAsync()` resolves after the chunk has been parsed and rendered. It is the safer primitive for
-flow control, tests, ordered snapshots, and producers that must not outpace the terminal.
+`writeAsync()` resolves after the chunk has been parsed and rendered. If the active renderer is
+recovering or falling back, the boundary waits for the retained frame to be repainted. It is the
+safer primitive for flow control, tests, ordered snapshots, and producers that must not outpace the
+terminal.
 
 ## Measure the right workload
 
@@ -51,6 +53,9 @@ For browser decisions, measure separately:
 - memory growth under realistic scrollback;
 - resize, font-load, and tab-visibility transitions;
 - the actual renderer reported by `terminal.renderer.backend`.
+
+Subscribe to the `renderer` event when a benchmark spans device loss or context restoration. Keep
+pre- and post-fallback samples separate instead of attributing them to one backend.
 
 Record browser version, hardware, device pixel ratio, terminal geometry, worker policy, renderer,
 accessibility mode, scrollback limit, font, and output corpus with every result.

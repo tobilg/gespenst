@@ -12,9 +12,9 @@ import type {
  * Renderer requested by an application, including automatic capability selection.
  *
  * @remarks
- * `'auto'` tries WebGPU, WebGL2, then Canvas 2D. An explicit `'webgpu'` request reports an
- * initialization failure instead of silently falling back. An explicit `'webgl2'` request falls
- * back to Canvas 2D when WebGL2 is unavailable.
+ * `'auto'` tries WebGPU, WebGL2, then Canvas 2D during initialization and runtime recovery. An
+ * explicit `'webgpu'` request reports failure instead of silently falling back. An explicit
+ * `'webgl2'` request falls back to Canvas 2D when WebGL2 is unavailable or cannot recover.
  */
 export type RendererPreference = 'auto' | 'webgpu' | 'webgl2' | 'canvas2d';
 /** Concrete renderer backend selected at runtime. */
@@ -64,8 +64,25 @@ interface BackgroundRenderer {
     blinkVisible: boolean,
     focused: boolean
   ): void;
-  onRestore(handler: () => void): void;
+  onFailure(handler: (error: Error) => void): void;
+  recover(): Promise<void>;
   dispose(): void;
+}
+
+type RendererChangeHandler = (info: RendererInfo, surfaceIndex: number) => void;
+
+const WEBGL_RECOVERY_TIMEOUT_MS = 1_000;
+
+function rendererOrder(preference: RendererPreference): readonly RendererBackend[] {
+  if (preference === 'webgpu') return ['webgpu'];
+  if (preference === 'webgl2') return ['webgl2', 'canvas2d'];
+  if (preference === 'canvas2d') return ['canvas2d'];
+  return ['webgpu', 'webgl2', 'canvas2d'];
+}
+
+/** Number of independent background surfaces required by a renderer preference. @internal */
+export function rendererSurfaceCount(preference: RendererPreference = 'auto'): number {
+  return rendererOrder(preference).length;
 }
 
 interface Rectangle {
@@ -192,8 +209,7 @@ class WebGpuBackground implements BackgroundRenderer {
   private pipeline: GPURenderPipeline;
   private readonly format: GPUTextureFormat;
   private readonly alphaMode: GPUCanvasAlphaMode;
-  private restoreHandler: (() => void) | null = null;
-  private restoring: Promise<void> | null = null;
+  private failureHandler: ((error: Error) => void) | null = null;
   private lost = false;
   private disposed = false;
 
@@ -220,13 +236,18 @@ class WebGpuBackground implements BackgroundRenderer {
     const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('No WebGPU adapter is available');
     const device = await adapter.requestDevice();
-    const gpuContext = context(canvas, 'webgpu') as GPUCanvasContext | null;
-    if (!gpuContext) throw new Error('The canvas has no WebGPU context');
-    const format = gpu.getPreferredCanvasFormat();
-    const alphaMode: GPUCanvasAlphaMode = allowTransparency ? 'premultiplied' : 'opaque';
-    gpuContext.configure({ device, format, alphaMode });
-    const pipeline = createWebGpuPipeline(device, format);
-    return new WebGpuBackground(canvas, device, gpuContext, pipeline, format, alphaMode);
+    try {
+      const gpuContext = context(canvas, 'webgpu') as GPUCanvasContext | null;
+      if (!gpuContext) throw new Error('The canvas has no WebGPU context');
+      const format = gpu.getPreferredCanvasFormat();
+      const alphaMode: GPUCanvasAlphaMode = allowTransparency ? 'premultiplied' : 'opaque';
+      gpuContext.configure({ device, format, alphaMode });
+      const pipeline = createWebGpuPipeline(device, format);
+      return new WebGpuBackground(canvas, device, gpuContext, pipeline, format, alphaMode);
+    } catch (error) {
+      device.destroy();
+      throw error;
+    }
   }
 
   resize(width: number, height: number): void {
@@ -246,10 +267,7 @@ class WebGpuBackground implements BackgroundRenderer {
     blinkVisible: boolean,
     focused: boolean
   ): void {
-    if (this.lost) {
-      void this.restore();
-      return;
-    }
+    if (this.lost) return;
     const data = vertexData(
       rectangles(frame, metrics, blinkVisible, focused),
       metrics.width,
@@ -280,58 +298,60 @@ class WebGpuBackground implements BackgroundRenderer {
       }
       pass.end();
       this.device.queue.submit([encoder.finish()]);
-    } catch {
+    } catch (error) {
       this.lost = true;
-      void this.restore();
+      this.failureHandler?.(asError(error, 'WebGPU rendering failed'));
     }
   }
 
-  onRestore(handler: () => void): void {
-    this.restoreHandler = handler;
+  onFailure(handler: (error: Error) => void): void {
+    this.failureHandler = handler;
   }
 
   dispose(): void {
     this.disposed = true;
-    this.restoreHandler = null;
+    this.failureHandler = null;
     this.buffer?.destroy();
     this.device.destroy();
+    this.canvas.width = 1;
+    this.canvas.height = 1;
   }
 
   private watchDevice(device: GPUDevice): void {
     void device.lost.then(() => {
-      if (this.disposed || this.device !== device) return;
+      // A synchronous render failure can precede the device-lost promise. Treat both signals as
+      // one failure so the same device is restored only once.
+      if (this.disposed || this.device !== device || this.lost) return;
       this.lost = true;
-      void this.restore();
+      this.failureHandler?.(new Error('The WebGPU device was lost'));
     });
   }
 
-  private restore(): Promise<void> {
-    if (this.restoring) return this.restoring;
-    this.restoring = (async () => {
-      const gpu = globalThis.navigator.gpu;
-      if (!gpu || this.disposed) return;
-      const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
-      if (!adapter || this.disposed) return;
-      const device = await adapter.requestDevice();
-      if (this.disposed) {
-        device.destroy();
-        return;
-      }
+  async recover(): Promise<void> {
+    const gpu = globalThis.navigator.gpu;
+    if (!gpu || this.disposed) throw new Error('WebGPU recovery is unavailable');
+    const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter || this.disposed) throw new Error('No WebGPU adapter is available for recovery');
+    const device = await adapter.requestDevice();
+    if (this.disposed) {
+      device.destroy();
+      throw new Error('WebGPU renderer was disposed during recovery');
+    }
+    try {
+      const pipeline = createWebGpuPipeline(device, this.format);
+      this.gpuContext.configure({ device, format: this.format, alphaMode: this.alphaMode });
       this.buffer?.destroy();
+      this.device.destroy();
       this.buffer = null;
       this.capacity = 0;
       this.device = device;
-      this.pipeline = createWebGpuPipeline(device, this.format);
-      this.gpuContext.configure({ device, format: this.format, alphaMode: this.alphaMode });
+      this.pipeline = pipeline;
       this.lost = false;
       this.watchDevice(device);
-      this.restoreHandler?.();
-    })()
-      .catch(() => undefined)
-      .finally(() => {
-        this.restoring = null;
-      });
-    return this.restoring;
+    } catch (error) {
+      device.destroy();
+      throw error;
+    }
   }
 }
 
@@ -407,27 +427,45 @@ class WebGlBackground implements BackgroundRenderer {
   private buffer: WebGLBuffer | null = null;
   private readonly canvas: RenderCanvas;
   private readonly gl: WebGL2RenderingContext;
-  private restoreHandler: (() => void) | null = null;
+  private failureHandler: ((error: Error) => void) | null = null;
+  private recovery:
+    | {
+        readonly resolve: () => void;
+        readonly reject: (error: Error) => void;
+        readonly timeout: ReturnType<typeof setTimeout>;
+        readonly promise: Promise<void>;
+      }
+    | undefined;
   private lost = false;
   private disposed = false;
   private readonly contextLost = (event: Event) => {
     event.preventDefault();
+    if (this.disposed || this.lost) return;
     this.lost = true;
+    this.failureHandler?.(new Error('The WebGL2 context was lost'));
   };
   private readonly contextRestored = () => {
     if (this.disposed) return;
-    this.initialize();
-    this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    this.lost = false;
-    this.restoreHandler?.();
+    try {
+      if (this.buffer) this.gl.deleteBuffer(this.buffer);
+      if (this.program) this.gl.deleteProgram(this.program);
+      this.buffer = null;
+      this.program = null;
+      this.initialize();
+      this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      this.lost = false;
+      this.settleRecovery();
+    } catch (error) {
+      this.settleRecovery(asError(error, 'WebGL2 restoration failed'));
+    }
   };
 
   constructor(canvas: RenderCanvas, gl: WebGL2RenderingContext) {
     this.canvas = canvas;
     this.gl = gl;
+    this.initialize();
     canvas.addEventListener('webglcontextlost', this.contextLost);
     canvas.addEventListener('webglcontextrestored', this.contextRestored);
-    this.initialize();
   }
 
   private initialize(): void {
@@ -497,32 +535,72 @@ class WebGlBackground implements BackgroundRenderer {
       metrics.width,
       metrics.height
     );
-    gl.clearColor(
-      frame.colors.background.r / 255,
-      frame.colors.background.g / 255,
-      frame.colors.background.b / 255,
-      opacity(frame.colors.background)
-    );
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(program);
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-    gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
-    gl.drawArrays(gl.TRIANGLES, 0, data.length / 6);
+    try {
+      gl.clearColor(
+        frame.colors.background.r / 255,
+        frame.colors.background.g / 255,
+        frame.colors.background.b / 255,
+        opacity(frame.colors.background)
+      );
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(program);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+      gl.drawArrays(gl.TRIANGLES, 0, data.length / 6);
+    } catch (error) {
+      this.lost = true;
+      this.failureHandler?.(asError(error, 'WebGL2 rendering failed'));
+    }
   }
 
-  onRestore(handler: () => void): void {
-    this.restoreHandler = handler;
+  onFailure(handler: (error: Error) => void): void {
+    this.failureHandler = handler;
+  }
+
+  recover(): Promise<void> {
+    if (!this.lost) return Promise.resolve();
+    if (this.disposed) return Promise.reject(new Error('WebGL2 renderer is disposed'));
+    if (this.recovery) return this.recovery.promise;
+    let resolveRecovery!: () => void;
+    let rejectRecovery!: (error: Error) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveRecovery = resolve;
+      rejectRecovery = reject;
+    });
+    const timeout = setTimeout(
+      () => this.settleRecovery(new Error('WebGL2 context restoration timed out')),
+      WEBGL_RECOVERY_TIMEOUT_MS
+    );
+    this.recovery = {
+      resolve: resolveRecovery,
+      reject: rejectRecovery,
+      timeout,
+      promise,
+    };
+    return promise;
   }
 
   dispose(): void {
     this.disposed = true;
-    this.restoreHandler = null;
+    this.failureHandler = null;
+    this.settleRecovery(new Error('WebGL2 renderer was disposed during recovery'));
     this.canvas.removeEventListener('webglcontextlost', this.contextLost);
     this.canvas.removeEventListener('webglcontextrestored', this.contextRestored);
     if (this.buffer) this.gl.deleteBuffer(this.buffer);
     if (this.program) this.gl.deleteProgram(this.program);
     this.buffer = null;
     this.program = null;
+    this.canvas.width = 1;
+    this.canvas.height = 1;
+  }
+
+  private settleRecovery(error?: Error): void {
+    const recovery = this.recovery;
+    if (!recovery) return;
+    this.recovery = undefined;
+    clearTimeout(recovery.timeout);
+    if (error) recovery.reject(error);
+    else recovery.resolve();
   }
 }
 
@@ -558,16 +636,54 @@ class CanvasBackground implements BackgroundRenderer {
     }
   }
 
-  onRestore(_handler: () => void): void {}
+  onFailure(_handler: (error: Error) => void): void {}
 
-  dispose(): void {}
+  recover(): Promise<void> {
+    return Promise.reject(new Error('Canvas 2D has no fallback renderer'));
+  }
+
+  dispose(): void {
+    this.canvas.width = 1;
+    this.canvas.height = 1;
+  }
+}
+
+async function createBackground(
+  canvas: RenderCanvas,
+  backend: RendererBackend,
+  allowTransparency: boolean
+): Promise<BackgroundRenderer> {
+  if (backend === 'webgpu') return WebGpuBackground.create(canvas, allowTransparency);
+  if (backend === 'canvas2d') return new CanvasBackground(canvas, allowTransparency);
+  const gl = context(canvas, 'webgl2', {
+    alpha: allowTransparency,
+    // The renderer blends and clears with straight alpha, so the canvas must not be told its
+    // colors are premultiplied. Left at its default of true, a translucent background is
+    // composited as though its channels were already scaled by alpha and renders opaque.
+    premultipliedAlpha: false,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    desynchronized: true,
+    preserveDrawingBuffer: false,
+  }) as WebGL2RenderingContext | null;
+  if (!gl) throw new Error('The canvas has no WebGL2 context');
+  return new WebGlBackground(canvas, gl);
+}
+
+function asError(reason: unknown, fallback: string): Error {
+  return reason instanceof Error ? reason : new Error(String(reason) || fallback);
 }
 
 export class HybridRenderer {
-  readonly info: RendererInfo;
   private readonly text: TextContext;
   private readonly textCanvas: RenderCanvas;
-  private readonly background: BackgroundRenderer;
+  private background: BackgroundRenderer;
+  private readonly surfaces: readonly RenderCanvas[];
+  private readonly order: readonly RendererBackend[];
+  private readonly allowTransparency: boolean;
+  private orderIndex: number;
+  private surfaceIndexValue: number;
   private metrics: RenderMetrics;
   private lastFrame: ViewportSnapshot | null = null;
   private readonly rowCache = new Map<number, RenderRow>();
@@ -577,26 +693,37 @@ export class HybridRenderer {
   private minimumContrastRatio: number;
   private readonly contrastCache = new Map<string, RenderColor>();
   private readonly blinkTimer: ReturnType<typeof setInterval>;
+  private rendererChangeHandler: RendererChangeHandler | null = null;
+  private rendererErrorHandler: ((error: Error) => void) | null = null;
+  private recoveryPromise: Promise<void> | null = null;
+  private queuedFailure: Error | null = null;
+  private fatalError: Error | null = null;
+  private disposed = false;
 
   private constructor(
     textCanvas: RenderCanvas,
     background: BackgroundRenderer,
+    surfaces: readonly RenderCanvas[],
+    order: readonly RendererBackend[],
+    orderIndex: number,
+    surfaceIndex: number,
     metrics: RenderMetrics,
-    minimumContrastRatio: number
+    minimumContrastRatio: number,
+    allowTransparency: boolean
   ) {
     this.textCanvas = textCanvas;
     this.background = background;
+    this.surfaces = surfaces;
+    this.order = order;
+    this.orderIndex = orderIndex;
+    this.surfaceIndexValue = surfaceIndex;
     this.metrics = metrics;
+    this.allowTransparency = allowTransparency;
     this.minimumContrastRatio = Math.max(1, Math.min(21, minimumContrastRatio));
     const text = context(textCanvas, '2d', { alpha: true });
     if (!text) throw new Error('The canvas has no 2D text context');
     this.text = text as TextContext;
-    this.info = { backend: background.backend, textShaping: 'browser-canvas' };
-    background.onRestore(() => {
-      const frame = this.lastFrame;
-      if (!frame) return;
-      this.paint(frame, new Set(frame.viewportRows.map((row) => row.y)));
-    });
+    this.bindBackground(background);
     this.resize(metrics);
     this.blinkTimer = setInterval(() => {
       const frame = this.lastFrame;
@@ -612,38 +739,63 @@ export class HybridRenderer {
   }
 
   static async create(
-    backgroundCanvas: RenderCanvas,
+    backgroundCanvases: RenderCanvas | readonly RenderCanvas[],
     textCanvas: RenderCanvas,
     metrics: RenderMetrics,
     preference: RendererPreference = 'auto',
     allowTransparency = false,
     minimumContrastRatio = 1
   ): Promise<HybridRenderer> {
-    let background: BackgroundRenderer | null = null;
-    if (preference !== 'webgl2' && preference !== 'canvas2d') {
+    const surfaces = Array.isArray(backgroundCanvases)
+      ? backgroundCanvases
+      : [backgroundCanvases as RenderCanvas];
+    const order = rendererOrder(preference);
+    let lastError: Error | null = null;
+    for (let index = 0; index < order.length; index += 1) {
+      const backend = order[index];
+      if (!backend) continue;
+      const surface = surfaces[index] ?? surfaces[surfaces.length - 1];
+      if (!surface) throw new Error('At least one renderer background surface is required');
+      let background: BackgroundRenderer | null = null;
       try {
-        background = await WebGpuBackground.create(backgroundCanvas, allowTransparency);
+        background = await createBackground(surface, backend, allowTransparency);
+        return new HybridRenderer(
+          textCanvas,
+          background,
+          surfaces,
+          order,
+          index,
+          Math.min(index, surfaces.length - 1),
+          metrics,
+          minimumContrastRatio,
+          allowTransparency
+        );
       } catch (error) {
-        if (preference === 'webgpu') throw error;
+        background?.dispose();
+        lastError = asError(error, `Unable to initialize ${backend}`);
       }
     }
-    if (!background && preference !== 'canvas2d') {
-      const gl = context(backgroundCanvas, 'webgl2', {
-        alpha: allowTransparency,
-        // The renderer blends and clears with straight alpha, so the canvas must not be told its
-        // colors are premultiplied. Left at its default of true, a translucent background is
-        // composited as though its channels were already scaled by alpha and renders opaque.
-        premultipliedAlpha: false,
-        antialias: false,
-        depth: false,
-        stencil: false,
-        desynchronized: true,
-        preserveDrawingBuffer: false,
-      }) as WebGL2RenderingContext | null;
-      if (gl) background = new WebGlBackground(backgroundCanvas, gl);
-    }
-    background ??= new CanvasBackground(backgroundCanvas, allowTransparency);
-    return new HybridRenderer(textCanvas, background, metrics, minimumContrastRatio);
+    throw lastError ?? new Error('No renderer backend could be initialized');
+  }
+
+  /** Active renderer and browser text-shaping implementation. */
+  get info(): RendererInfo {
+    return { backend: this.background.backend, textShaping: 'browser-canvas' };
+  }
+
+  /** Index of the background surface presenting the active renderer. @internal */
+  get surfaceIndex(): number {
+    return this.surfaceIndexValue;
+  }
+
+  /** Observes successful restoration and fallback transitions. @internal */
+  onRendererChange(handler: RendererChangeHandler): void {
+    this.rendererChangeHandler = handler;
+  }
+
+  /** Observes a renderer that could neither recover nor fall back. @internal */
+  onRendererError(handler: (error: Error) => void): void {
+    this.rendererErrorHandler = handler;
   }
 
   resize(metrics: RenderMetrics): void {
@@ -655,7 +807,9 @@ export class HybridRenderer {
     this.lastCursorRow = null;
   }
 
-  render(frame: ViewportSnapshot | RenderFrame): void {
+  render(frame: ViewportSnapshot | RenderFrame): void | Promise<void> {
+    if (this.fatalError) throw this.fatalError;
+    if (this.disposed) throw new Error('Renderer is disposed');
     const changed = 'viewportRows' in frame ? frame.viewportRows : frame.changedRows;
     for (const row of changed) this.rowCache.set(row.y, row);
     for (const y of [...this.rowCache.keys()]) {
@@ -683,6 +837,7 @@ export class HybridRenderer {
     if (frame.cursor.y !== null) damage.add(frame.cursor.y);
     this.lastCursorRow = frame.cursor.y;
     this.paint(snapshot, damage);
+    return this.recoveryPromise ?? undefined;
   }
 
   /** Updates whether active or inactive selection colors should be used. */
@@ -704,10 +859,100 @@ export class HybridRenderer {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     clearInterval(this.blinkTimer);
     this.lastFrame = null;
     this.rowCache.clear();
+    this.rendererChangeHandler = null;
+    this.rendererErrorHandler = null;
+    this.queuedFailure = null;
     this.background.dispose();
+  }
+
+  private bindBackground(background: BackgroundRenderer): void {
+    background.onFailure((error) => this.startRecovery(error));
+  }
+
+  private startRecovery(cause: Error): void {
+    if (this.disposed || this.fatalError) return;
+    if (this.recoveryPromise) {
+      this.queuedFailure = cause;
+      return;
+    }
+    const recovery = this.recoverUntilStable(cause).catch((error: unknown) => {
+      if (this.disposed) return;
+      const failure = asError(error, `Renderer recovery failed after: ${cause.message}`);
+      this.fatalError = failure;
+      this.rendererErrorHandler?.(failure);
+      throw failure;
+    });
+    this.recoveryPromise = recovery;
+    void recovery.catch(() => undefined);
+    void recovery
+      .finally(() => {
+        if (this.recoveryPromise === recovery) this.recoveryPromise = null;
+      })
+      .catch(() => undefined);
+  }
+
+  private async recoverUntilStable(initialCause: Error): Promise<void> {
+    let cause: Error | null = initialCause;
+    while (cause && !this.disposed) {
+      this.queuedFailure = null;
+      await this.recover(cause);
+      cause = this.queuedFailure;
+    }
+  }
+
+  private async recover(cause: Error): Promise<void> {
+    try {
+      await this.background.recover();
+      if (this.disposed) return;
+      this.repaintAll();
+      if (!this.queuedFailure) this.rendererChangeHandler?.(this.info, this.surfaceIndexValue);
+      return;
+    } catch (recoveryError) {
+      if (this.disposed) return;
+      let lastError = asError(recoveryError, cause.message);
+      this.background.dispose();
+      for (let index = this.orderIndex + 1; index < this.order.length; index += 1) {
+        const backend = this.order[index];
+        if (!backend) continue;
+        const surfaceIndex = Math.min(index, this.surfaces.length - 1);
+        const surface = this.surfaces[surfaceIndex];
+        if (!surface) continue;
+        let background: BackgroundRenderer | null = null;
+        try {
+          background = await createBackground(surface, backend, this.allowTransparency);
+          if (this.disposed) {
+            background.dispose();
+            return;
+          }
+          background.resize(this.metrics.width, this.metrics.height);
+          this.background = background;
+          this.orderIndex = index;
+          this.surfaceIndexValue = surfaceIndex;
+          this.bindBackground(background);
+          this.repaintAll();
+          if (!this.queuedFailure) this.rendererChangeHandler?.(this.info, surfaceIndex);
+          return;
+        } catch (error) {
+          background?.dispose();
+          lastError = asError(error, `Unable to fall back to ${backend}`);
+        }
+      }
+      throw new Error(
+        `The ${this.order[this.orderIndex]} renderer could not recover: ${lastError.message}`,
+        { cause: lastError }
+      );
+    }
+  }
+
+  private repaintAll(): void {
+    const frame = this.lastFrame;
+    if (!frame) return;
+    this.paint(frame, new Set(frame.viewportRows.map((row) => row.y)));
   }
 
   private paint(frame: ViewportSnapshot, damage: ReadonlySet<number>): void {

@@ -3,9 +3,10 @@ import '@gespenst/core/style.css';
 import { themes } from '@gespenst/themes';
 import './style.css';
 import './example.css';
+import { demoTerminalRuntime } from './demo-runtime';
+import { installPageLifecycle } from './page-lifecycle';
 import {
   callbacksWasmUrl,
-  ensureWasmerBrowserSupport,
   formatStartupError,
   requiredElement,
   type StartupPhase,
@@ -21,6 +22,8 @@ const status = requiredElement<HTMLElement>('#renderer-status');
 const error = requiredElement<HTMLElement>('#terminal-error');
 let terminal: GespenstTerminal | null = null;
 let startupPhase: StartupPhase = 'browser';
+let pageTearingDown = false;
+let activeShellLabel: string | null = null;
 
 /**
  * The window carries the alpha on its background and keeps the text opaque black, so the gradient
@@ -37,12 +40,22 @@ const glassTheme = {
 
 makeDraggable();
 
+installPageLifecycle({
+  dispose: () => {
+    pageTearingDown = true;
+    terminal?.dispose();
+  },
+  restore: () => {
+    terminal?.fit();
+    terminal?.focus();
+  },
+});
+
 try {
-  await ensureWasmerBrowserSupport(setStatus);
   startupPhase = 'terminal';
-  terminal = await createTerminal({
+  const created = await createTerminal({
     container: host,
-    worker: 'dedicated',
+    ...demoTerminalRuntime(),
     accessibility: 'full',
     fontFamily: 'JetBrains Mono, SFMono-Regular, Consolas, monospace',
     fontSizePx: 13,
@@ -53,28 +66,48 @@ try {
     wasm: wasmUrl,
     callbacksWasm: callbacksWasmUrl,
   });
+  if (pageTearingDown) {
+    created.dispose();
+    throw new Error('Page was unloaded during terminal startup');
+  }
+  terminal = created;
+  terminal.on('renderer', ({ backend }) => {
+    if (activeShellLabel) setStatus(`${backend.toUpperCase()} · ${activeShellLabel}`);
+  });
   setStatus(`${terminal.renderer.backend.toUpperCase()} · starting Bash`);
-  await terminal.writeAsync('Starting a browser-only WASIX Bash session…\r\n\r\n');
+  terminal.element.classList.add('docs-shell-starting');
+  terminal.element.setAttribute('aria-busy', 'true');
+  try {
+    await terminal.writeAsync('Starting a browser-only Bash session…\r\n\r\n');
 
-  startupPhase = 'bash';
-  const { session } = await startBash(terminal, setStatus);
-  setStatus(`${terminal.renderer.backend.toUpperCase()} · WASIX Bash`);
-  terminal.focus();
-  void session.exit.then(
-    ({ code }) => setStatus(`Bash exited · code ${code}`),
-    (reason: unknown) => showFailure(reason, 'bash')
-  );
+    startupPhase = 'bash';
+    const { session, label } = await startBash(terminal, setStatus);
+    activeShellLabel = label;
+    setStatus(`${terminal.renderer.backend.toUpperCase()} · ${label}`);
+    terminal.focus();
+    void session.exit.then(
+      ({ code }) => {
+        if (!pageTearingDown) setStatus(`Bash exited · code ${code}`);
+      },
+      (reason: unknown) => {
+        if (!pageTearingDown) showFailure(reason, 'bash');
+      }
+    );
+  } finally {
+    terminal.element.classList.remove('docs-shell-starting');
+    terminal.element.removeAttribute('aria-busy');
+  }
 } catch (reason) {
   showFailure(reason, startupPhase);
 }
 
-window.addEventListener('pagehide', () => terminal?.dispose(), { once: true });
-
 function setStatus(text: string): void {
+  if (pageTearingDown) return;
   status.textContent = text;
 }
 
 function showFailure(reason: unknown, phase: StartupPhase): void {
+  if (pageTearingDown) return;
   setStatus(startupFailureTitle(phase));
   error.hidden = false;
   error.textContent = formatStartupError(reason, phase);

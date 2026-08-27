@@ -116,18 +116,12 @@ importers:
       '@gespenst/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@gespenst/shell':
+        specifier: workspace:*
+        version: link:../../packages/shell
       '@gespenst/themes':
         specifier: workspace:*
         version: link:../../packages/themes
-      '@gespenst/wasmer':
-        specifier: workspace:*
-        version: link:../../packages/wasmer
-      '@wasmer/sdk':
-        specifier: 0.10.0
-        version: 0.10.0
-      coi-serviceworker:
-        specifier: 0.1.7
-        version: 0.1.7
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -148,6 +142,16 @@ importers:
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
+
+  packages/bashkit:
+    dependencies:
+      '@everruns/bashkit-wasm':
+        specifier: 0.17.1
+        version: 0.17.1
+    devDependencies:
+      '@gespenst/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/clipboard:
     devDependencies:
@@ -179,6 +183,16 @@ importers:
         specifier: workspace:*
         version: link:../core
 
+  packages/shell:
+    dependencies:
+      '@gespenst/bashkit':
+        specifier: workspace:*
+        version: link:../bashkit
+    devDependencies:
+      '@gespenst/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/svelte:
     dependencies:
       svelte:
@@ -204,15 +218,6 @@ importers:
       '@gespenst/core':
         specifier: workspace:*
         version: link:../core
-
-  packages/wasmer:
-    devDependencies:
-      '@gespenst/core':
-        specifier: workspace:*
-        version: link:../core
-      '@wasmer/sdk':
-        specifier: 0.10.0
-        version: 0.10.0
 
   packages/web-fonts:
     devDependencies:
@@ -569,6 +574,9 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@everruns/bashkit-wasm@0.17.1':
+    resolution: {integrity: sha512-wAtZR7OOC/EqVik6WOXOiXfP1Zwm41XjNtCVtKQ33X47PpQCuy/qT4prJNcwnWk5cnNQwnXJyiCfND6mnIO1aA==}
 
   '@gerrit0/mini-shiki@3.23.0':
     resolution: {integrity: sha512-bEMORlG0cqdjVyCEuU0cDQbORWX+kYCeo0kV1lbxF5bt4r7SID2l9bqsxJEM0zndaxpOUT7riCyIVEuqq/Ynxg==}
@@ -1010,9 +1018,6 @@ packages:
   '@vue/shared@3.5.21':
     resolution: {integrity: sha512-+2k1EQpnYuVuu3N7atWyG3/xoFWIVJZq4Mz8XNOdScFI0etES75fbny/oU4lKWk/577P1zmg0ioYvpGEDZ3DLw==}
 
-  '@wasmer/sdk@0.10.0':
-    resolution: {integrity: sha512-YQ+s5tGag6P/I8kp9BTH+XhjoS9UFvWiZJvnWEEovClHffhYToKhprWr4UJG7wLP7c/2HQpGkF7ZrjoUvKjdmA==}
-
   '@webgpu/types@0.1.72':
     resolution: {integrity: sha512-0cF7RFM2edNoiIS1ODJp0/Gzv4/xSXhwoR0YCza+OWpJWtn4wmo9DvK91aLlH9+uUnwIriP7ZiC3WitmyhuzBw==}
 
@@ -1102,9 +1107,6 @@ packages:
   clsx@2.1.1:
     resolution: {integrity: sha512-eYm0QWBtUrBWZWG0d386OGAw16Z995PiOVo2B7bjWSbHedGl5e0ZWaq65kOGgUSNesEIDkB9ISbTg/JK9dhCZA==}
     engines: {node: '>=6'}
-
-  coi-serviceworker@0.1.7:
-    resolution: {integrity: sha512-bjSUqEngCPOkErY2vbyWsaIGCNRODYzlNycaREVw5s12/C8SM+RnRUUeX6pZbTtov6C52ZLY/+tvHK+BDxuUuA==}
 
   convert-source-map@2.0.0:
     resolution: {integrity: sha512-Kvp459HrV2FEJ1CAsi1Ku+MY3kasH19TFykTz2xWmMeq6bk2NU3XXvfJ+Q61m0xktWwt+1HSYf3JZsTms3aRJg==}
@@ -1794,9 +1796,6 @@ packages:
     resolution: {integrity: sha512-ba+dRL/75VQQY7RkU/CgriGbkoWAfS8TDyUlJfJhJ8KhtXgMl5dhNvoPNUcQ9IWRhW8u41glMSuZeTvsYq2rRg==}
     hasBin: true
 
-  web-worker@1.5.0:
-    resolution: {integrity: sha512-RiMReJrTAiA+mBjGONMnjVDP2u3p9R1vkcGz6gDIrOMT3oGuYwX2WRMYI9ipkphSuE5XKEhydbhNEJh4NY9mlw==}
-
   webidl-conversions@3.0.1:
     resolution: {integrity: sha512-2JAn3z8AR6rjK8Sm8orRC0h/bcl/DqL7tRPdGZ4I1CjdF+EaMLmYxBHyXuKL849eucPFhvBoxMsflfOb8kxaeQ==}
 
@@ -2126,6 +2125,8 @@ snapshots:
 
   '@esbuild/win32-x64@0.28.2':
     optional: true
+
+  '@everruns/bashkit-wasm@0.17.1': {}
 
   '@gerrit0/mini-shiki@3.23.0':
     dependencies:
@@ -2529,10 +2530,6 @@ snapshots:
 
   '@vue/shared@3.5.21': {}
 
-  '@wasmer/sdk@0.10.0':
-    dependencies:
-      web-worker: 1.5.0
-
   '@webgpu/types@0.1.72': {}
 
   '@xterm/addon-attach@0.12.0': {}
@@ -2594,8 +2591,6 @@ snapshots:
   ci-info@3.9.0: {}
 
   clsx@2.1.1: {}
-
-  coi-serviceworker@0.1.7: {}
 
   convert-source-map@2.0.0: {}
 
@@ -3200,8 +3195,6 @@ snapshots:
       typescript: 7.0.2
 
   wabt@1.0.39: {}
-
-  web-worker@1.5.0: {}
 
   webidl-conversions@3.0.1: {}
 

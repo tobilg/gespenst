@@ -33,13 +33,15 @@ export interface TerminalOptions extends CoreTerminalOptions {
    * Worker policy: main thread, dedicated worker, or shared worker.
    *
    * @defaultValue A dedicated worker when `Worker` and `OffscreenCanvas` are supported, otherwise
-   * the main thread. `true` is equivalent to `'dedicated'`.
+   * the main thread. A dedicated worker that fails during startup is retried on the main thread;
+   * shared-worker startup remains strict. `true` is equivalent to `'dedicated'`.
    */
   readonly worker?: boolean | 'dedicated' | 'shared';
   /**
    * Preferred renderer with automatic fallback.
    *
-   * @defaultValue `'auto'`, which tries WebGPU, WebGL2, then Canvas 2D.
+   * @defaultValue `'auto'`, which tries WebGPU, WebGL2, then Canvas 2D during initialization and
+   * after an accelerated renderer cannot recover at runtime.
    */
   readonly renderer?: RendererPreference;
   /** Enables alpha in terminal theme colors and rendering surfaces. @defaultValue `false` */
@@ -173,7 +175,7 @@ export type BrowserTerminalEventMap = Omit<TerminalEventMap, 'render'> & {
   readonly bufferChange: TerminalBufferChangeEvent;
   /** Emitted after a changed browser layout has been dispatched to the terminal backend. */
   readonly resize: TerminalGeometry;
-  /** Renderer selected after capability detection or restoration. */
+  /** Renderer selected after capability detection, restoration, or runtime fallback. */
   readonly renderer: RendererInfo;
   /** Emitted after queued output has been parsed and rendered. */
   readonly writeParsed: undefined;
@@ -199,7 +201,7 @@ export interface BrowserTerminal {
   readonly element: HTMLElement;
   /** The current grid and device-pixel backing-surface dimensions. */
   readonly geometry: TerminalGeometry;
-  /** Active renderer and text-shaping information. */
+  /** Live active renderer and text-shaping information. */
   readonly renderer: RendererInfo;
   /** Current authored theme. Missing properties inherit from `DEFAULT_THEME`. */
   readonly theme: Readonly<TerminalTheme>;

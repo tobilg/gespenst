@@ -255,6 +255,27 @@ describe('TerminalWorkerHost', () => {
 
     expect(messages.filter((message) => message.type === 'error')).toHaveLength(2);
   });
+
+  it('forwards renderer restoration, fallback, and fatal recovery events', async () => {
+    const renderer = fakeRenderer();
+    const { host, messages } = workerHost({
+      createRenderer: vi.fn(async () => renderer.renderer),
+    });
+    await host.handle(init(4, 4));
+
+    renderer.change({ backend: 'webgl2', textShaping: 'browser-canvas' }, 1);
+    renderer.fail(new Error('renderer recovery failed'));
+
+    expect(messages).toContainEqual({
+      terminalId: 4,
+      type: 'renderer',
+      renderer: { backend: 'webgl2', textShaping: 'browser-canvas' },
+      surfaceIndex: 1,
+    });
+    expect(messages).toContainEqual(
+      expect.objectContaining({ terminalId: 4, type: 'error', message: 'renderer recovery failed' })
+    );
+  });
 });
 
 function init(terminalId: number, runtimeKey: number, accessibility = false): MainToWorkerMessage {
@@ -274,7 +295,7 @@ function init(terminalId: number, runtimeKey: number, accessibility = false): Ma
       accessibility,
       allowTransparency: false,
       minimumContrastRatio: 1,
-      backgroundCanvas: {} as OffscreenCanvas,
+      backgroundCanvases: [{} as OffscreenCanvas],
       textCanvas: {} as OffscreenCanvas,
     },
   };
@@ -321,16 +342,30 @@ function fakeRenderer() {
   const render = vi.fn();
   const setFocused = vi.fn();
   const dispose = vi.fn();
+  let rendererChange: ((info: HybridRenderer['info'], surfaceIndex: number) => void) | undefined;
+  let rendererError: ((error: Error) => void) | undefined;
+  const onRendererChange = vi.fn((handler) => {
+    rendererChange = handler;
+  });
+  const onRendererError = vi.fn((handler) => {
+    rendererError = handler;
+  });
   return {
     resize,
     render,
     setFocused,
     dispose,
+    change: (info: HybridRenderer['info'], surfaceIndex: number) =>
+      rendererChange?.(info, surfaceIndex),
+    fail: (error: Error) => rendererError?.(error),
     renderer: {
       info: { backend: 'canvas2d', textShaping: 'browser-canvas' },
+      surfaceIndex: 0,
       resize,
       render,
       setFocused,
+      onRendererChange,
+      onRendererError,
       dispose,
     } as unknown as HybridRenderer,
   };

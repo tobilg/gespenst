@@ -3,6 +3,7 @@ title: Core Guide
 children:
   Getting Started: ./getting-started.md
   Connecting a PTY: ./connecting-a-pty.md
+  Browser-only Shells: ./browser-shells.md
   Configuration: ./configuration.md
   Layout, Fonts, and Themes: ./layout-fonts-themes.md
   Theming: ./theming.md
@@ -25,6 +26,7 @@ rendered terminal, then covers PTY transport, sizing, fonts, application policy,
 | --- | --- |
 | Render a terminal in a web application | [Getting Started](./getting-started.md) |
 | Attach a remote shell or local PTY | [Connecting a PTY](./connecting-a-pty.md) |
+| Run Bash entirely in the browser | [Browser-only Shells](./browser-shells.md) |
 | Tune workers, rendering, scrollback, or accessibility | [Configuration](./configuration.md) |
 | Make fonts, sizing, and themes predictable | [Layout, Fonts, and Themes](./layout-fonts-themes.md) |
 | Customize colors, transparency, and ANSI palettes | [Theming](./theming.md) |
@@ -39,8 +41,9 @@ avoids unnecessary text conversion on the hot path.
 ## Package boundaries
 
 Use `@gespenst/core` for the browser terminal and `@gespenst/core/headless` for the
-DOM-free runtime. Optional packages add WebSocket transport, browser-only WASIX shells, framework
-bindings, search, serialization, clipboard access, fonts, links, and xterm.js compatibility.
+DOM-free runtime. Optional packages add WebSocket transport, portable browser-only shells,
+framework bindings, search, serialization, clipboard access, fonts, links, and xterm.js
+compatibility.
 
 The package vendors a checksummed Ghostty nightly WASM artifact. Pin package versions in production
 so a dependency update and a Ghostty engine update happen together and can be tested together.

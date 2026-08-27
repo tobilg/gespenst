@@ -22,13 +22,14 @@ package implements the stable xterm.js 6.0 public API on top.
 
 | Package | Purpose |
 | --- | --- |
+| `@gespenst/bashkit` | Portable single-process browser Bash powered by BashKit |
 | `@gespenst/core` | Native browser terminal and headless Ghostty runtime |
 | `@gespenst/clipboard` | Permission-aware text and MIME clipboard paste |
 | `@gespenst/themes` | Curated, tree-shakable light and dark terminal themes |
 | `@gespenst/xterm` | xterm.js 6.0 stable public API compatibility |
 | `@gespenst/websocket` | Binary WebSocket transport, resize protocol, backpressure, reconnect |
-| `@gespenst/wasmer` | Browser-only WASIX shells and virtual filesystems powered by Wasmer |
 | `@gespenst/search` | Search and viewport highlights |
+| `@gespenst/shell` | Stable browser-only Bash facade powered by BashKit |
 | `@gespenst/web-links` | Safe HTTP(S) link detection and activation |
 | `@gespenst/web-fonts` | Main-thread and worker web-font loading |
 | `@gespenst/serialize` | Versioned terminal snapshots with build metadata |
@@ -81,23 +82,31 @@ const connection = terminal.connect({
 await connection.closed;
 ```
 
-For a shell that runs entirely in the browser, use `@gespenst/wasmer`. It adapts a Wasmer
-WASIX process to the same native byte transport without requiring a PTY server:
+For a shell that runs entirely in the browser, use `@gespenst/shell`. It provides a stable facade
+over BashKit's stateful, single-process interpreter and works on static hosting without a PTY
+server or browser-isolation headers:
 
 ```ts
-import { WasmerAddon } from '@gespenst/wasmer';
+import { BrowserShellAddon } from '@gespenst/shell';
 
-const shell = new WasmerAddon({
-  package: { type: 'registry', specifier: 'sharrattj/bash@1.0.17' },
+const shell = new BrowserShellAddon({
+  bashkit: {
+    bash: {
+      cwd: '/home/guest',
+      files: { '/home/guest/README.md': 'Browser-only shell\n' },
+    },
+  },
 });
 terminal.loadAddon(shell);
-await shell.ready;
+const ready = await shell.ready;
+console.log(ready.backend);
 ```
 
-Wasmer requires a secure, cross-origin-isolated page. Send
-`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` from the
-site hosting the terminal. Registry packages can make network requests; self-host a pinned WebC
-artifact with the package's `url` source for deterministic deployments.
+Use `@gespenst/bashkit` directly when an application needs implementation-specific filesystem or
+snapshot APIs. The shell is independent of rendering: its session remains active while core moves
+from WebGPU to WebGL2 or Canvas 2D after an unrecoverable graphics failure. BashKit is not a Linux
+VM and cannot launch arbitrary native or WASI programs; connect `@gespenst/websocket` to a real
+server-side PTY when applications need a full operating-system shell.
 
 Dedicated workers are the default. Use `worker: 'shared'` to multiplex several terminals through
 one worker, or `worker: false` for a deterministic main-thread fallback. Renderer preferences are
@@ -269,5 +278,6 @@ Cloudflare Pages; see the [release guide](docs/releasing.md) for the project and
 
 ## License
 
-MIT. The vendored Ghostty WASM and copied xterm.js public declarations are MIT licensed; see the
-third-party notices in their respective packages.
+MIT. The vendored Ghostty WASM, copied xterm.js public declarations, and documentation-only demo
+runtime are disclosed in the repository and package-specific
+[third-party notices](THIRD_PARTY_NOTICES.md).

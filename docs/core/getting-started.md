@@ -53,6 +53,8 @@ possible.
 
 Call `dispose()` when the view is removed. Disposal closes connections, disposes addons in reverse
 activation order, releases loaded font faces, terminates owned workers, and removes terminal DOM.
+For a top-level browser page, distinguish permanent teardown from BFCache preservation; see
+[Page and component lifecycle](./events-permissions-lifecycle.md#page-and-component-lifecycle).
 
 ## Next
 

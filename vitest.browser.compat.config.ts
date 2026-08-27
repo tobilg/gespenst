@@ -6,12 +6,6 @@ export default defineConfig({
   optimizeDeps: {
     include: ['@xterm/xterm'],
   },
-  server: {
-    headers: {
-      'Cross-Origin-Embedder-Policy': 'require-corp',
-      'Cross-Origin-Opener-Policy': 'same-origin',
-    },
-  },
   resolve: {
     alias: {
       '@gespenst/core': resolve(import.meta.dirname, 'packages/core/src/index.ts'),
@@ -22,6 +16,7 @@ export default defineConfig({
   test: {
     name: 'browser-compatibility',
     include: [
+      'packages/bashkit/tests/browser/bashkit.test.ts',
       'packages/core/tests/browser/compatibility.test.ts',
       'packages/search/tests/browser/compatibility.test.ts',
       'packages/xterm/tests/browser/compatibility.test.ts',

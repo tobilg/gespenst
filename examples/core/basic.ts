@@ -14,7 +14,12 @@ const terminal = await createTerminal({
 terminal.write('\x1b[1;32mgespenst is ready\x1b[0m\r\n');
 terminal.focus();
 
-window.addEventListener('beforeunload', () => terminal.dispose(), { once: true });
+window.addEventListener('pagehide', (event) => {
+  if (!event.persisted) terminal.dispose();
+});
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) terminal.fit();
+});
 // #endregion setup
 
 function requiredElement<ElementType extends Element>(selector: string): ElementType {

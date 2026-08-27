@@ -2,9 +2,10 @@ import { ClipboardAddon } from '@gespenst/clipboard';
 import { createTerminal, type GespenstTerminal, terminalColorToCss } from '@gespenst/core';
 import '@gespenst/core/style.css';
 import { type ThemeName, themeMetadata, themes } from '@gespenst/themes';
+import { demoTerminalRuntime } from './demo-runtime';
+import { installPageLifecycle } from './page-lifecycle';
 import {
   callbacksWasmUrl,
-  ensureWasmerBrowserSupport,
   formatStartupError,
   requiredElement,
   type StartupPhase,
@@ -22,6 +23,8 @@ const themeSelect = requiredElement<HTMLSelectElement>('#theme-select');
 let terminal: GespenstTerminal | null = null;
 let startupFailed = false;
 let startupPhase: StartupPhase = 'browser';
+let pageTearingDown = false;
+let activeShellLabel: string | null = null;
 
 for (const name of Object.keys(themes) as ThemeName[]) {
   const option = document.createElement('option');
@@ -45,12 +48,22 @@ reset.addEventListener('click', () => {
   else clearDisplay();
 });
 
+installPageLifecycle({
+  dispose: () => {
+    pageTearingDown = true;
+    terminal?.dispose();
+  },
+  restore: () => {
+    terminal?.fit();
+    terminal?.focus();
+  },
+});
+
 try {
-  await ensureWasmerBrowserSupport(setStatus);
   startupPhase = 'terminal';
-  terminal = await createTerminal({
+  const created = await createTerminal({
     container: host,
-    worker: 'dedicated',
+    ...demoTerminalRuntime(),
     accessibility: 'full',
     fontFamily: 'JetBrains Mono, SFMono-Regular, Consolas, monospace',
     fontSizePx: 13,
@@ -58,6 +71,14 @@ try {
     theme: themes.gespenstDark,
     wasm: wasmUrl,
     callbacksWasm: callbacksWasmUrl,
+  });
+  if (pageTearingDown) {
+    created.dispose();
+    throw new Error('Page was unloaded during terminal startup');
+  }
+  terminal = created;
+  terminal.on('renderer', ({ backend }) => {
+    if (activeShellLabel) setStatus(`${backend.toUpperCase()} · ${activeShellLabel}`);
   });
   const clipboard = new ClipboardAddon({
     confirmUnsafePaste: ({ text }) =>
@@ -67,26 +88,36 @@ try {
   terminal.loadAddon(clipboard);
   await clipboard.ready;
   setStatus(`${terminal.renderer.backend.toUpperCase()} · starting Bash`);
-  await terminal.writeAsync(
-    '\x1b[38;2;208;138;63mgespenst\x1b[0m\r\n' +
-      'Starting a browser-only WASIX Bash session…\r\n\r\n'
-  );
+  terminal.element.classList.add('docs-shell-starting');
+  terminal.element.setAttribute('aria-busy', 'true');
+  try {
+    await terminal.writeAsync(
+      '\x1b[38;2;208;138;63mgespenst\x1b[0m\r\n' + 'Starting a browser-only Bash session…\r\n\r\n'
+    );
 
-  startupPhase = 'bash';
-  const { session } = await startBash(terminal, setStatus);
-  setStatus(`${terminal.renderer.backend.toUpperCase()} · WASIX Bash`);
-  terminal.focus();
-  void session.exit.then(
-    ({ code }) => setStatus(`Bash exited · code ${code}`),
-    (reason: unknown) => showFailure(reason, 'bash')
-  );
+    startupPhase = 'bash';
+    const { session, label } = await startBash(terminal, setStatus);
+    activeShellLabel = label;
+    setStatus(`${terminal.renderer.backend.toUpperCase()} · ${label}`);
+    terminal.focus();
+    void session.exit.then(
+      ({ code }) => {
+        if (!pageTearingDown) setStatus(`Bash exited · code ${code}`);
+      },
+      (reason: unknown) => {
+        if (!pageTearingDown) showFailure(reason, 'bash');
+      }
+    );
+  } finally {
+    terminal.element.classList.remove('docs-shell-starting');
+    terminal.element.removeAttribute('aria-busy');
+  }
 } catch (reason) {
   showFailure(reason, startupPhase);
 }
 
-window.addEventListener('pagehide', () => terminal?.dispose(), { once: true });
-
 function setStatus(text: string): void {
+  if (pageTearingDown) return;
   status.textContent = text;
 }
 
@@ -104,6 +135,7 @@ function clearDisplay(): void {
 }
 
 function showFailure(reason: unknown, phase: StartupPhase): void {
+  if (pageTearingDown) return;
   startupFailed = true;
   setStatus(startupFailureTitle(phase));
   reset.textContent = phase === 'bash' ? 'Retry Bash' : 'Reload demo';

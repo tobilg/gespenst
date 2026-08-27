@@ -11,13 +11,14 @@ from TypeScript files that are checked with the rest of the workspace.
 
 | Package | Purpose |
 | --- | --- |
+| `@gespenst/bashkit` | Portable single-process browser Bash powered by BashKit |
 | `@gespenst/core` | Browser terminal, headless VT runtime, rendering, input, and transports |
 | `@gespenst/clipboard` | Permission-aware text and MIME clipboard paste |
 | `@gespenst/themes` | Curated, tree-shakable terminal themes and metadata |
 | `@gespenst/xterm` | xterm.js 6 compatibility layer backed by the native core |
 | `@gespenst/websocket` | Binary WebSocket transport with resize and reconnect support |
-| `@gespenst/wasmer` | Browser-only WASIX shells powered by Wasmer packages |
 | `@gespenst/search` | Paged full-scrollback search, navigation, and canvas highlights |
+| `@gespenst/shell` | Stable browser-only Bash facade powered by BashKit |
 | `@gespenst/serialize` | Versioned terminal snapshots |
 | `@gespenst/web-links` | Safe web-link detection and activation |
 | `@gespenst/web-fonts` | Worker-safe web-font loading |

@@ -12,8 +12,10 @@ export default defineConfig({
         'packages/core/src/types.ts',
         'packages/core/src/core/exports.ts',
         'packages/core/src/worker/terminal-worker.ts',
-        'packages/wasmer/src/index.ts',
-        'packages/wasmer/src/types.ts',
+        'packages/bashkit/src/index.ts',
+        'packages/bashkit/src/types.ts',
+        'packages/shell/src/index.ts',
+        'packages/shell/src/types.ts',
       ],
       reporter: ['text', 'html', 'lcov', 'json-summary'],
       reportsDirectory: 'coverage',
@@ -35,7 +37,11 @@ export default defineConfig({
           branches: 65,
           lines: 82,
         },
-        'packages/wasmer/src/**': {
+        'packages/bashkit/src/**': {
+          branches: 70,
+          lines: 85,
+        },
+        'packages/shell/src/**': {
           branches: 70,
           lines: 85,
         },
