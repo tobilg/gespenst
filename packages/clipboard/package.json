@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/clipboard",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Permission-aware Kitty clipboard protocol support for gespenst",
   "type": "module",
   "license": "MIT",
@@ -24,7 +24,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.1"
+    "@gespenst/core": "^0.1.2"
   },
   "devDependencies": {
     "@gespenst/core": "workspace:*"

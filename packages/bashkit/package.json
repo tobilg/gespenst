@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/bashkit",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Single-process browser Bash addon for gespenst powered by BashKit",
   "type": "module",
   "license": "MIT",
@@ -25,7 +25,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.1"
+    "@gespenst/core": "^0.1.2"
   },
   "dependencies": {
     "@everruns/bashkit-wasm": "0.17.1"

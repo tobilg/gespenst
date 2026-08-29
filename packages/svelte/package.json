@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/svelte",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Svelte bindings for the Ghostty-powered web terminal",
   "type": "module",
   "license": "MIT",
@@ -24,7 +24,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.1",
+    "@gespenst/core": "^0.1.2",
     "svelte": ">=5.55.7 <6"
   },
   "devDependencies": {
