@@ -21,6 +21,39 @@ The package ships the xterm.js 6.0 stable public declarations but has no xterm.j
 Initialization is asynchronous internally; calls and writes queue safely, and `ready` plus `native`
 expose explicit boundaries.
 
+## Runtime and performance controls
+
+The upstream constructor options stay unchanged. Gespenst-specific controls live under the nested
+`gespenst` key so they cannot collide with future xterm.js options:
+
+```ts
+import { preloadXtermRuntime, Terminal } from '@gespenst/xterm';
+
+const runtime = await preloadXtermRuntime();
+const terminal = new Terminal({
+  cols: 120,
+  rows: 40,
+  scrollback: 10_000,
+  gespenst: {
+    ...runtime,
+    worker: 'shared',
+    renderer: 'auto',
+  },
+});
+```
+
+`preloadXtermRuntime()` compiles and caches both WASM modules. Pass its result to one or more
+terminals to move compilation out of their startup path. A dedicated worker remains the default;
+use `shared` when many simultaneous terminals should share one Ghostty runtime, or `false` for a
+controlled main-thread benchmark. `renderer: 'auto'` keeps the WebGPU → WebGL2 → Canvas2D fallback
+ladder.
+
+For output, keep PTY data as `Uint8Array` and use write callbacks for flow control. The compatibility
+layer completes callbacks after parsing and xterm buffer synchronization, while `onRender` remains
+the painted-frame boundary. This matches xterm.js and avoids forcing every small write to wait for a
+browser animation frame. Large scrollback writes are internally segmented so the stable xterm
+buffer view retains every row without rereading the full Ghostty buffer.
+
 Theme, selection, cursor-accent, extended ANSI, `allowTransparency`, and `minimumContrastRatio`
 options are forwarded to the native renderer. Init-only options can be changed before `open()`;
 native initialization starts when `open()` is called. Use `toXtermTheme()` when a Gespenst theme

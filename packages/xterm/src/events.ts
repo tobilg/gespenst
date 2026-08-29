@@ -8,6 +8,14 @@ export class EventEmitter<T> implements IDisposable {
     return { dispose: () => this.listeners.delete(listener) };
   };
 
+  get hasListeners(): boolean {
+    return this.listeners.size > 0;
+  }
+
+  get size(): number {
+    return this.listeners.size;
+  }
+
   fire(value: T): void {
     for (const listener of [...this.listeners]) listener(value);
   }

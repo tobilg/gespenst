@@ -27,6 +27,7 @@
     "release:pack": "node scripts/pack-release.mjs",
     "security:audit": "pnpm audit --audit-level moderate",
     "bench": "vitest bench",
+    "bench:browser": "node scripts/benchmark-browser.mjs",
     "bench:throughput": "pnpm --filter @gespenst/benchmarks bench",
     "docs:assets": "node scripts/prepare-docs.mjs",
     "docs:api": "pnpm --dir tools/typedoc generate",

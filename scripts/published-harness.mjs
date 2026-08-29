@@ -153,10 +153,7 @@ try {
   } else {
     const browserReports = [];
     for (const browserName of options.browsers) {
-      const withBenchmarks = browserName === 'chromium';
-      browserReports.push(
-        await runBrowser(browserName, server.localUrl, reportRoot, withBenchmarks)
-      );
+      browserReports.push(await runBrowser(browserName, server.localUrl, reportRoot, false));
     }
     const finalReport = {
       generatedAt: new Date().toISOString(),
@@ -530,6 +527,11 @@ function configurePtySocket(socket, sessions, cwd) {
       TERM: 'xterm-256color',
       COLORTERM: 'truecolor',
       PS1: 'pty $ ',
+      // Keep the validation shell independent of the developer's dotfiles. Inheriting an
+      // interactive zsh/bash configuration can display update prompts and consume the first
+      // command before the scenario gets a usable prompt.
+      ENV: '/dev/null',
+      BASH_ENV: '/dev/null',
     },
   });
   const session = { socket, terminal, closed: false };
@@ -579,7 +581,7 @@ function closePtySession(session, sessions, kill = true) {
 
 function shellPath() {
   if (process.platform === 'win32') return process.env.COMSPEC ?? 'cmd.exe';
-  return process.env.SHELL ?? '/bin/sh';
+  return '/bin/sh';
 }
 
 function shellArguments() {

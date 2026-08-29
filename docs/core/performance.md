@@ -45,6 +45,23 @@ It runs warmups and multiple measured samples, then reports the median. Use it f
 comparisons on the same machine, runtime, WASM artifact, input fixture, and power state. Do not use a
 single local result as a universal browser throughput claim.
 
+Use the visible-browser runner for end-to-end and xterm.js compatibility comparisons:
+
+```sh
+pnpm bench:browser
+pnpm bench:browser -- --profile ci
+pnpm bench:browser -- --candidate npm:next --baseline npm:latest --browser chromium,firefox
+```
+
+It builds isolated consumers, records exact package and machine provenance, randomizes
+implementation order with a recorded seed, validates frame cadence, and separates parser,
+completion-callback, render, and following-frame presentation boundaries. The report preserves raw
+samples, confidence intervals, variance warnings, long-task health, and normalized candidate ratios.
+Published packages without internal phase instrumentation are reported only at their supported
+public callback boundary; their time is never relabeled as parser time. See the
+[published-package harness guide](https://github.com/tobilg/gespenst/blob/main/harness/published/README.md#performance-comparison)
+for the full workload and output schema.
+
 For browser decisions, measure separately:
 
 - time from receiving a PTY chunk to the next painted frame;

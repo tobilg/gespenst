@@ -1,13 +1,42 @@
 import type {
   CellColor,
   RenderCell,
-  RenderRow,
   RgbColor,
   TerminalBufferRow,
   TerminalBufferSnapshot,
 } from '@gespenst/core';
 import type { IBuffer, IBufferCell, IBufferLine, IBufferNamespace } from '@xterm/xterm';
 import { EventEmitter } from './events';
+
+const CELL_WORDS = 3;
+const CONTENT_CODEPOINT_MASK = 0x1fffff;
+const CONTENT_WIDTH_SHIFT = 21;
+const CONTENT_COMBINED = 1 << 23;
+const CONTENT_UNDERLINE_SHIFT = 24;
+const CONTENT_PRESENT = 1 << 27;
+const COLOR_VALUE_MASK = 0xffffff;
+const COLOR_MODE_MASK = 0x3000000;
+
+export type PackedBufferString = readonly [column: number, value: string];
+
+export interface PackedBufferRow {
+  readonly index: number;
+  readonly id?: string;
+  readonly cells: Uint32Array;
+  readonly strings: readonly PackedBufferString[];
+  readonly hyperlinks: readonly PackedBufferString[];
+  readonly wrapped: boolean;
+  readonly wrapContinuation: boolean;
+}
+
+export interface PackedBufferSnapshot {
+  readonly state: TerminalBufferSnapshot['state'];
+  readonly rows: readonly PackedBufferRow[];
+  /** Explicit journal operations emitted by the version-matched core bridge. */
+  readonly trimmed?: number;
+  readonly appendStart?: number;
+  readonly reset?: boolean;
+}
 
 export interface BufferUpdateResult {
   readonly missing: { readonly start: number; readonly end: number } | null;
@@ -32,63 +61,82 @@ function encodedColor(color: CellColor | undefined, resolved: RgbColor | null): 
 }
 
 export class BufferCell implements IBufferCell {
-  private cell: RenderCell | null = null;
+  private content = 0;
+  private foreground = 0;
+  private background = 0;
+  private chars = '';
 
   load(cell: RenderCell | null): this {
-    this.cell = cell;
+    const packed = cell ? packCell(cell) : null;
+    this.content = packed?.content ?? 0;
+    this.foreground = packed?.foreground ?? 0;
+    this.background = packed?.background ?? 0;
+    this.chars = packed?.chars ?? '';
+    return this;
+  }
+
+  loadPacked(row: PackedBufferRow, column: number): this {
+    const offset = column * CELL_WORDS;
+    this.content = offset < row.cells.length ? (row.cells[offset] ?? 0) : CONTENT_PRESENT;
+    this.foreground = row.cells[offset + 1] ?? 0;
+    this.background = row.cells[offset + 2] ?? 0;
+    this.chars =
+      (this.content & CONTENT_COMBINED) !== 0
+        ? (findSparseValue(row.strings, column) ?? '')
+        : codepointText(this.content & CONTENT_CODEPOINT_MASK);
     return this;
   }
 
   getWidth(): number {
-    if (!this.cell || this.cell.width === 'spacer-tail' || this.cell.width === 'spacer-head')
-      return 0;
-    return this.cell.width === 'wide' ? 2 : 1;
+    const width = (this.content >>> CONTENT_WIDTH_SHIFT) & 0x3;
+    if ((this.content & CONTENT_PRESENT) === 0 || width === 2 || width === 3) return 0;
+    return width === 1 ? 2 : 1;
   }
   getChars(): string {
-    return this.cell?.text ?? '';
+    return this.chars;
   }
   getCode(): number {
-    const chars = [...(this.cell?.text ?? '')];
+    const chars = [...this.chars];
     return chars.at(-1)?.codePointAt(0) ?? 0;
   }
   getFgColorMode(): number {
-    return colorMode(this.cell?.foregroundSource, this.cell?.foreground ?? null);
+    return this.foreground & COLOR_MODE_MASK;
   }
   getBgColorMode(): number {
-    return colorMode(this.cell?.backgroundSource, this.cell?.background ?? null);
+    return this.background & COLOR_MODE_MASK;
   }
   getFgColor(): number {
-    return encodedColor(this.cell?.foregroundSource, this.cell?.foreground ?? null);
+    return this.foreground & COLOR_VALUE_MASK;
   }
   getBgColor(): number {
-    return encodedColor(this.cell?.backgroundSource, this.cell?.background ?? null);
+    return this.background & COLOR_VALUE_MASK;
   }
   isBold(): number {
-    return this.cell?.style.bold ? 1 : 0;
+    return (this.foreground >>> 26) & 1;
   }
   isItalic(): number {
-    return this.cell?.style.italic ? 1 : 0;
+    return (this.foreground >>> 27) & 1;
   }
   isDim(): number {
-    return this.cell?.style.faint ? 1 : 0;
+    return (this.foreground >>> 28) & 1;
   }
   isUnderline(): number {
-    return this.cell?.style.underline ?? 0;
+    return (this.content >>> CONTENT_UNDERLINE_SHIFT) & 0x7;
   }
   isBlink(): number {
-    return this.cell?.style.blink ? 1 : 0;
+    return (this.background >>> 26) & 1;
   }
   isInverse(): number {
-    return this.cell?.style.inverse ? 1 : 0;
+    return (this.background >>> 27) & 1;
   }
   isInvisible(): number {
-    return this.cell?.style.invisible ? 1 : 0;
+    return (this.background >>> 28) & 1;
   }
   isStrikethrough(): number {
-    return this.cell?.style.strikethrough ? 1 : 0;
+    return (this.background >>> 29) & 1;
   }
   isOverline(): number {
-    return this.cell?.style.overline ? 1 : 0;
+    return (this.background >>> 30) & 1;
   }
   isFgRGB(): boolean {
     return this.getFgColorMode() === 0x3000000;
@@ -111,30 +159,29 @@ export class BufferCell implements IBufferCell {
     return this.getBgColorMode() === 0;
   }
   isAttributeDefault(): boolean {
-    const cell = this.cell;
     return (
       this.isFgDefault() &&
       this.isBgDefault() &&
-      !cell?.style.bold &&
-      !cell?.style.italic &&
-      !cell?.style.faint &&
-      !cell?.style.blink &&
-      !cell?.style.inverse &&
-      !cell?.style.invisible &&
-      !cell?.style.strikethrough &&
-      !cell?.style.overline &&
-      !cell?.style.underline
+      !this.isBold() &&
+      !this.isItalic() &&
+      !this.isDim() &&
+      !this.isBlink() &&
+      !this.isInverse() &&
+      !this.isInvisible() &&
+      !this.isStrikethrough() &&
+      !this.isOverline() &&
+      !this.isUnderline()
     );
   }
 }
 
 class BufferLine implements IBufferLine {
-  readonly row: RenderRow;
+  row: PackedBufferRow;
   length: number;
 
-  constructor(row: RenderRow, cols: number) {
+  constructor(row: PackedBufferRow, cols: number) {
     this.row = row;
-    this.length = Math.max(cols, row.cells.length);
+    this.length = Math.max(cols, row.cells.length / CELL_WORDS);
   }
 
   get isWrapped(): boolean {
@@ -142,34 +189,62 @@ class BufferLine implements IBufferLine {
   }
 
   resize(cols: number): void {
-    this.length = Math.max(cols, this.row.cells.length);
+    this.length = Math.max(cols, this.row.cells.length / CELL_WORDS);
+  }
+
+  update(row: PackedBufferRow, cols: number): void {
+    this.row = row;
+    this.resize(cols);
   }
 
   getCell(x: number, cell?: IBufferCell): IBufferCell | undefined {
     if (x < 0 || x >= this.length) return undefined;
     const target = cell instanceof BufferCell ? cell : new BufferCell();
-    return target.load(this.row.cells[x] ?? null);
+    return target.loadPacked(this.row, x);
   }
 
   translateToString(trimRight = false, startColumn = 0, endColumn = this.length): string {
     let value = '';
     for (let x = Math.max(0, startColumn); x < Math.min(this.length, endColumn); x += 1) {
-      const cell = this.row.cells[x];
-      if (cell?.width === 'spacer-tail' || cell?.width === 'spacer-head') continue;
-      value += cell?.text || ' ';
+      const offset = x * CELL_WORDS;
+      const content = this.row.cells[offset] ?? 0;
+      const width = (content >>> CONTENT_WIDTH_SHIFT) & 0x3;
+      if (width === 2 || width === 3) continue;
+      value +=
+        (content & CONTENT_COMBINED) !== 0
+          ? (findSparseValue(this.row.strings, x) ?? ' ')
+          : codepointText(content & CONTENT_CODEPOINT_MASK) || ' ';
     }
     return trimRight ? value.replace(/\s+$/u, '') : value;
   }
 }
 
-function renderRow(row: TerminalBufferRow): RenderRow {
+function packedRow(row: TerminalBufferRow): PackedBufferRow {
+  let cellCount = row.cells.length;
+  while (cellCount > 0 && isDefaultBlank(row.cells[cellCount - 1])) cellCount -= 1;
+  const cells = new Uint32Array(cellCount * CELL_WORDS);
+  const strings: PackedBufferString[] = [];
+  const hyperlinks: PackedBufferString[] = [];
+  for (let index = 0; index < cellCount; index += 1) {
+    const cell = row.cells[index];
+    if (!cell) continue;
+    const packed = packCell(cell);
+    const offset = cell.x * CELL_WORDS;
+    if (offset < 0 || offset + 2 >= cells.length) continue;
+    cells[offset] = packed.content;
+    cells[offset + 1] = packed.foreground;
+    cells[offset + 2] = packed.background;
+    if ((packed.content & CONTENT_COMBINED) !== 0) strings.push([cell.x, packed.chars]);
+    if (cell.hyperlinkUri) hyperlinks.push([cell.x, cell.hyperlinkUri]);
+  }
   return {
-    y: row.index,
-    text: row.text,
-    cells: row.cells,
+    index: row.index,
+    id: row.id,
+    cells,
+    strings,
+    hyperlinks,
     wrapped: row.wrapped,
     wrapContinuation: row.wrapContinuation,
-    selection: row.selection,
   };
 }
 
@@ -179,26 +254,39 @@ export class BufferView implements IBuffer {
   cursorX = 0;
   viewportY = 0;
   baseY = 0;
-  private lines: BufferLine[];
-  private rowIds: string[];
+  private lines: Array<BufferLine | undefined> = [];
+  private head = 0;
+  private lengthValue = 0;
+  private definedCount = 0;
+  private cols: number;
 
-  constructor(type: 'normal' | 'alternate', cols: number, rows: number) {
+  constructor(type: 'normal' | 'alternate', cols: number, rows: number, capacity = rows) {
     this.type = type;
-    this.lines = blankLines(cols, rows);
-    this.rowIds = [];
+    this.cols = cols;
+    this.ensureCapacity(Math.max(rows, capacity));
+    this.setLength(rows, true);
   }
 
   get length(): number {
-    return this.lines.length;
+    return this.lengthValue;
   }
 
   resize(cols: number, rows: number): void {
-    for (const line of this.lines) line?.resize(cols);
-    while (this.lines.length < rows) this.lines.push(...blankLines(cols, 1));
+    this.cols = cols;
+    if (this.lengthValue < rows) this.setLength(rows, true);
   }
 
-  update(snapshot: TerminalBufferSnapshot, cols: number): BufferUpdateResult {
-    const { state, rows } = snapshot;
+  reserve(capacity: number): void {
+    this.ensureCapacity(capacity);
+  }
+
+  update(
+    snapshot: TerminalBufferSnapshot | PackedBufferSnapshot,
+    cols: number
+  ): BufferUpdateResult {
+    const { state } = snapshot;
+    const rows = snapshot.rows.map((row) => (isPackedRow(row) ? row : packedRow(row)));
+    this.cols = cols;
     let needsFullRead = false;
     let trimmed = 0;
     let identityReset = false;
@@ -207,76 +295,186 @@ export class BufferView implements IBuffer {
     this.baseY = state.scrollbackRows;
     this.viewportY = state.viewportY;
 
+    if (isSemanticSnapshot(snapshot)) {
+      const hadRows = this.hasRetainedRows();
+      if (snapshot.reset) {
+        identityReset = hadRows;
+        this.resetStorage(state.totalRows);
+      } else {
+        trimmed = Math.min(snapshot.trimmed, this.lengthValue);
+        if (trimmed > 0) this.trimFront(trimmed, state.totalRows);
+        else this.setLength(state.totalRows);
+      }
+      for (const row of rows) this.setRow(row.index, row);
+      return {
+        missing: this.missingRange(snapshot.appendStart),
+        trimmed,
+        identityReset,
+      };
+    }
+
     const completePage = rows[0]?.index === 0 && rows.length === state.totalRows;
-    const retained = rows.find((row) => this.rowIds.includes(row.id));
-    const previousIndex = retained ? this.rowIds.indexOf(retained.id) : -1;
+    const retained = rows.find((row) => row.id !== undefined && this.findRowIndex(row.id) >= 0);
+    const previousIndex = retained?.id ? this.findRowIndex(retained.id) : -1;
     const shift = retained && previousIndex >= 0 ? retained.index - previousIndex : 0;
     trimmed = Math.max(0, -shift);
     if (completePage) {
-      identityReset = this.rowIds.length > 0 && rows.length > 0 && !retained;
-      this.lines = [];
-      this.rowIds = [];
-    } else if (this.rowIds.length > 0 && rows.length > 0) {
+      identityReset = this.hasRetainedRows() && rows.length > 0 && !retained;
+      this.resetStorage(state.totalRows);
+    } else if (this.definedCount > 0 && rows.length > 0) {
       const first = rows[0];
       if (retained && previousIndex >= 0) {
-        if (shift !== 0) {
-          const shiftedLines: BufferLine[] = [];
-          const shiftedIds: string[] = [];
-          for (let index = 0; index < this.lines.length; index += 1) {
-            const next = index + shift;
-            if (next < 0 || next >= state.totalRows) continue;
-            const line = this.lines[index];
-            const id = this.rowIds[index];
-            if (line && id) {
-              shiftedLines[next] = line;
-              shiftedIds[next] = id;
-            }
-          }
-          this.lines = shiftedLines;
-          this.rowIds = shiftedIds;
-        }
-      } else if (first && this.rowIds[first.index]) {
+        if (shift < 0) this.trimFront(-shift, state.totalRows);
+        else if (shift > 0) needsFullRead = true;
+      } else if (first && this.getLineValue(first.index)) {
         needsFullRead = true;
       }
     }
-
-    this.lines.length = state.totalRows;
-    this.rowIds.length = state.totalRows;
-    for (const row of rows) {
-      this.lines[row.index] = new BufferLine(renderRow(row), cols);
-      this.rowIds[row.index] = row.id;
+    if (!completePage && shift >= 0) {
+      trimmed = Math.max(trimmed, Math.max(0, this.lengthValue - state.totalRows));
+      this.setLength(state.totalRows);
     }
+    for (const row of rows) this.setRow(row.index, row);
     if (needsFullRead)
       return {
         missing: { start: 0, end: state.totalRows },
         trimmed,
         identityReset,
       };
-    let start = -1;
-    let end = -1;
-    for (let index = 0; index < state.totalRows; index += 1) {
-      if (!this.lines[index] || !this.rowIds[index]) {
-        if (start === -1) start = index;
-        end = index + 1;
-      }
-    }
+    if (this.definedCount === state.totalRows) return { missing: null, trimmed, identityReset };
     return {
-      missing: start === -1 ? null : { start, end },
+      // A sparse/non-overlapping delta is exceptional. Request one authoritative page without
+      // scanning every retained row; steady-state append/trim updates keep rowSlots complete.
+      missing: { start: 0, end: state.totalRows },
       trimmed,
       identityReset,
     };
   }
 
   getLine(y: number): IBufferLine | undefined {
-    return this.lines[y];
+    if (y < 0 || y >= this.lengthValue) return undefined;
+    const line = this.lines[this.slot(y)];
+    line?.resize(this.cols);
+    return line;
   }
 
-  getRenderCell(y: number, x: number): RenderCell | undefined {
-    return this.lines[y]?.row.cells[x];
+  getHyperlink(y: number, x: number): string | undefined {
+    const row = this.getLineValue(y)?.row;
+    return row ? findSparseValue(row.hyperlinks, x) : undefined;
   }
 
   getNullCell(): IBufferCell {
     return new BufferCell();
+  }
+
+  private ensureCapacity(length: number): void {
+    if (this.lines.length >= length) return;
+    let capacity = Math.max(16, this.lines.length || 1);
+    while (capacity < length) capacity *= 2;
+    const nextLines: Array<BufferLine | undefined> = new Array(capacity);
+    for (let index = 0; index < this.lengthValue; index += 1) {
+      const previousSlot = this.slot(index);
+      const line = this.lines[previousSlot];
+      nextLines[index] = line;
+    }
+    this.lines = nextLines;
+    this.head = 0;
+  }
+
+  private setLength(length: number, fillBlanks = false): void {
+    const next = Math.max(0, length);
+    this.ensureCapacity(next);
+    if (next < this.lengthValue) {
+      for (let index = next; index < this.lengthValue; index += 1) this.clearSlot(this.slot(index));
+    } else {
+      for (let index = this.lengthValue; index < next; index += 1) {
+        const slot = this.slot(index);
+        this.lines[slot] = fillBlanks ? blankLine(this.cols, index) : undefined;
+        if (fillBlanks) this.definedCount += 1;
+      }
+    }
+    this.lengthValue = next;
+  }
+
+  private resetStorage(length: number): void {
+    this.lines = [];
+    this.head = 0;
+    this.lengthValue = 0;
+    this.definedCount = 0;
+    this.ensureCapacity(length);
+    this.setLength(length);
+  }
+
+  private trimFront(count: number, totalRows: number): void {
+    const amount = Math.min(Math.max(0, count), this.lengthValue);
+    for (let index = 0; index < amount; index += 1) this.clearSlot(this.slot(index));
+    if (this.lines.length > 0) this.head = (this.head + amount) % this.lines.length;
+    this.lengthValue -= amount;
+    this.setLength(totalRows);
+  }
+
+  private setRow(index: number, row: PackedBufferRow): void {
+    if (index < 0 || index >= this.lengthValue) return;
+    const slot = this.slot(index);
+    const line = this.lines[slot];
+    if (line) line.update(row, this.cols);
+    else {
+      this.lines[slot] = new BufferLine(row, this.cols);
+      this.definedCount += 1;
+    }
+  }
+
+  private clearSlot(slot: number): void {
+    if (this.lines[slot]) this.definedCount -= 1;
+    this.lines[slot] = undefined;
+  }
+
+  private findRowIndex(id: string): number {
+    for (let index = 0; index < this.lengthValue; index += 1) {
+      if (this.lines[this.slot(index)]?.row.id === id) return index;
+    }
+    return -1;
+  }
+
+  private hasRetainedRows(): boolean {
+    for (let index = 0; index < this.lengthValue; index += 1) {
+      const id = this.lines[this.slot(index)]?.row.id;
+      if (id && !id.startsWith('blank:')) return true;
+    }
+    return false;
+  }
+
+  private missingRange(start: number): { readonly start: number; readonly end: number } | null {
+    if (this.definedCount === this.lengthValue) return null;
+    let first = -1;
+    let last = -1;
+    for (
+      let index = Math.max(0, Math.min(start, this.lengthValue));
+      index < this.lengthValue;
+      index += 1
+    ) {
+      if (this.lines[this.slot(index)]) continue;
+      if (first < 0) first = index;
+      last = index;
+    }
+    if (first < 0) {
+      for (let index = 0; index < Math.min(start, this.lengthValue); index += 1) {
+        if (this.lines[this.slot(index)]) continue;
+        if (first < 0) first = index;
+        last = index;
+      }
+    }
+    return first < 0 ? null : { start: first, end: last + 1 };
+  }
+
+  private getLineValue(index: number): BufferLine | undefined {
+    if (index < 0 || index >= this.lengthValue) return undefined;
+    return this.lines[this.slot(index)];
+  }
+
+  private slot(index: number): number {
+    if (this.lines.length === 0) return 0;
+    return (this.head + index) % this.lines.length;
   }
 }
 
@@ -287,8 +485,8 @@ export class BufferNamespace implements IBufferNamespace {
   private readonly change = new EventEmitter<IBuffer>();
   readonly onBufferChange = this.change.event;
 
-  constructor(cols: number, rows: number) {
-    this.normal = new BufferView('normal', cols, rows);
+  constructor(cols: number, rows: number, scrollback = 0) {
+    this.normal = new BufferView('normal', cols, rows, rows + scrollback);
     this.alternate = new BufferView('alternate', cols, rows);
     this.activeValue = this.normal;
   }
@@ -304,7 +502,10 @@ export class BufferNamespace implements IBufferNamespace {
     this.change.fire(next);
   }
 
-  update(snapshot: TerminalBufferSnapshot, cols: number): BufferUpdateResult {
+  update(
+    snapshot: TerminalBufferSnapshot | PackedBufferSnapshot,
+    cols: number
+  ): BufferUpdateResult {
     this.setAlternate(snapshot.state.screen === 'alternate');
     return this.activeValue.update(snapshot, cols);
   }
@@ -314,9 +515,14 @@ export class BufferNamespace implements IBufferNamespace {
     this.alternate.resize(cols, rows);
   }
 
+  reserveNormal(capacity: number): void {
+    this.normal.reserve(capacity);
+  }
+
   /** @internal Returns Ghostty cell metadata for compatibility services such as OSC 8 links. */
-  cellAt(y: number, x: number): RenderCell | undefined {
-    return this.activeValue.getRenderCell(y, x);
+  cellAt(y: number, x: number): { readonly hyperlinkUri?: string } | undefined {
+    const hyperlinkUri = this.activeValue.getHyperlink(y, x);
+    return hyperlinkUri ? { hyperlinkUri } : undefined;
   }
 
   dispose(): void {
@@ -324,16 +530,122 @@ export class BufferNamespace implements IBufferNamespace {
   }
 }
 
-function blankLines(cols: number, rows: number): BufferLine[] {
-  return Array.from({ length: rows }, (_, y) => {
-    const row: RenderRow = {
-      y,
-      text: ' '.repeat(cols),
-      cells: [],
+function blankLine(cols: number, y: number): BufferLine {
+  const cells = new Uint32Array(cols * CELL_WORDS);
+  for (let x = 0; x < cols; x += 1) cells[x * CELL_WORDS] = CONTENT_PRESENT;
+  return new BufferLine(
+    {
+      index: y,
+      id: `blank:${y}`,
+      cells,
+      strings: [],
+      hyperlinks: [],
       wrapped: false,
       wrapContinuation: false,
-      selection: null,
-    };
-    return new BufferLine(row, cols);
-  });
+    },
+    cols
+  );
+}
+
+function packCell(cell: RenderCell): {
+  readonly content: number;
+  readonly foreground: number;
+  readonly background: number;
+  readonly chars: string;
+} {
+  const chars = cell.text;
+  const firstCodepoint = chars.codePointAt(0) ?? 0;
+  const combined = chars.length > (firstCodepoint > 0xffff ? 2 : firstCodepoint > 0 ? 1 : 0);
+  const codepoint = combined ? lastCodepoint(chars) : firstCodepoint;
+  const width =
+    cell.width === 'wide'
+      ? 1
+      : cell.width === 'spacer-tail'
+        ? 2
+        : cell.width === 'spacer-head'
+          ? 3
+          : 0;
+  return {
+    content:
+      (codepoint & CONTENT_CODEPOINT_MASK) |
+      (width << CONTENT_WIDTH_SHIFT) |
+      (combined ? CONTENT_COMBINED : 0) |
+      ((cell.style.underline & 0x7) << CONTENT_UNDERLINE_SHIFT) |
+      CONTENT_PRESENT,
+    foreground:
+      colorMode(cell.foregroundSource, cell.foreground) |
+      encodedColor(cell.foregroundSource, cell.foreground) |
+      (cell.style.bold ? 1 << 26 : 0) |
+      (cell.style.italic ? 1 << 27 : 0) |
+      (cell.style.faint ? 1 << 28 : 0),
+    background:
+      colorMode(cell.backgroundSource, cell.background) |
+      encodedColor(cell.backgroundSource, cell.background) |
+      (cell.style.blink ? 1 << 26 : 0) |
+      (cell.style.inverse ? 1 << 27 : 0) |
+      (cell.style.invisible ? 1 << 28 : 0) |
+      (cell.style.strikethrough ? 1 << 29 : 0) |
+      (cell.style.overline ? 1 << 30 : 0),
+    chars,
+  };
+}
+
+function codepointText(codepoint: number): string {
+  return codepoint > 0 ? String.fromCodePoint(codepoint) : '';
+}
+
+function lastCodepoint(value: string): number {
+  let result = 0;
+  for (let index = 0; index < value.length; ) {
+    result = value.codePointAt(index) ?? 0;
+    index += result > 0xffff ? 2 : 1;
+  }
+  return result;
+}
+
+function findSparseValue(
+  values: readonly PackedBufferString[],
+  column: number
+): string | undefined {
+  for (const [candidate, value] of values) {
+    if (candidate === column) return value;
+    if (candidate > column) return undefined;
+  }
+  return undefined;
+}
+
+function isPackedRow(row: TerminalBufferRow | PackedBufferRow): row is PackedBufferRow {
+  return row.cells instanceof Uint32Array;
+}
+
+function isSemanticSnapshot(
+  snapshot: TerminalBufferSnapshot | PackedBufferSnapshot
+): snapshot is PackedBufferSnapshot &
+  Required<Pick<PackedBufferSnapshot, 'trimmed' | 'appendStart' | 'reset'>> {
+  return (
+    'trimmed' in snapshot &&
+    snapshot.trimmed !== undefined &&
+    snapshot.appendStart !== undefined &&
+    snapshot.reset !== undefined
+  );
+}
+
+function isDefaultBlank(cell: RenderCell | undefined): boolean {
+  if (!cell || cell.text || cell.width !== 'narrow' || cell.hyperlink) return false;
+  const style = cell.style;
+  return (
+    cell.foreground === null &&
+    cell.background === null &&
+    (!cell.foregroundSource || cell.foregroundSource.mode === 'default') &&
+    (!cell.backgroundSource || cell.backgroundSource.mode === 'default') &&
+    !style.bold &&
+    !style.italic &&
+    !style.faint &&
+    !style.blink &&
+    !style.inverse &&
+    !style.invisible &&
+    !style.strikethrough &&
+    !style.overline &&
+    style.underline === 0
+  );
 }

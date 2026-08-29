@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createCoreRuntime, KeyModifiers } from '../src/core';
+import { XtermCompatibilityReader } from '../src/core/xterm-reader.js';
 
 describe('Ghostty core runtime', () => {
   it('parses VT, renders rows, and emits terminal effects', async () => {
@@ -275,6 +276,56 @@ describe('Ghostty core runtime', () => {
 
     terminal.setScrollbackLines(20);
     terminal.setDefaultCursor('bar', true);
+    runtime.dispose();
+  });
+
+  it('packs Ghostty render state for the xterm compatibility journal', async () => {
+    const runtime = await createCoreRuntime();
+    const terminal = runtime.createTerminal({ cols: 6, rows: 3, scrollbackLines: 20 });
+
+    terminal.write(
+      '\x1b]8;;https://example.com\x07' +
+        '\x1b[1;3;4;5;7;8;9;53;38;5;42;48;2;1;2;3mA' +
+        '\x1b[0m\x1b]8;;\x07e\u0301界123456'
+    );
+    const initial = terminal.xtermCompatibilityUpdate();
+
+    expect(initial.dirty).toBe('full');
+    expect(initial.reset).toBe(true);
+    expect(initial.rows.length).toBe(initial.state.totalRows);
+    expect(initial.rows.some((row) => row.strings.some(([, value]) => value === 'é'))).toBe(true);
+    expect(
+      initial.rows.some((row) =>
+        row.hyperlinks.some(([, value]) => value === 'https://example.com')
+      )
+    ).toBe(true);
+    expect(initial.rows.some((row) => row.cells.some((word) => word !== 0))).toBe(true);
+    expect(initial.rows.some((row) => row.wrapped || row.wrapContinuation)).toBe(true);
+
+    const clean = terminal.xtermCompatibilityUpdate();
+    expect(clean).toMatchObject({ dirty: 'clean', reset: false, rows: [] });
+
+    terminal.beginXtermCompatibilityBatch();
+    terminal.write('\r\nnext');
+    const partial = terminal.xtermCompatibilityUpdate();
+    expect(partial.dirty).toBe('partial');
+    expect(partial.reset).toBe(false);
+    expect(partial.rows.some((row) => row.cells.length > 0)).toBe(true);
+
+    terminal.resize(8, 4);
+    expect(terminal.xtermCompatibilityUpdate().dirty).toBe('full');
+
+    const disposedReader = new XtermCompatibilityReader(runtime.bindings);
+    disposedReader.invalidate();
+    disposedReader.dispose();
+    disposedReader.dispose();
+    expect(() =>
+      disposedReader.read(0, initial.state, {
+        selectCompatibilityRow: () => -1,
+        compatibilityHyperlinkUri: () => null,
+      } as never)
+    ).toThrow('XtermCompatibilityReader is disposed');
+
     runtime.dispose();
   });
 });

@@ -16,6 +16,10 @@ declarations = declarations.replace(
   'export class Terminal implements IDisposable {',
   "export class Terminal implements IDisposable {\n    readonly ready: Promise<void>;\n    readonly native: Promise<import('@gespenst/core').GespenstTerminal>;"
 );
+declarations = declarations.replace(
+  'constructor(options?: ITerminalOptions & ITerminalInitOnlyOptions);',
+  'constructor(options?: GespenstTerminalOptions);'
+);
 declarations = declarations
   .replace(
     'onKey: IEvent<{ key: string, domEvent: KeyboardEvent }>;',
@@ -34,6 +38,14 @@ declarations =
   "export const XTERM_COMPAT_VERSION: '6.0.0';\n" +
   '/** Error thrown when an xterm.js extension point cannot be implemented over Ghostty. */\n' +
   'export class XtermCompatibilityError extends Error { readonly feature: string; }\n' +
+  '/** Gespenst runtime and renderer controls layered on top of xterm.js options. */\n' +
+  "export interface GespenstXtermRuntimeOptions { readonly worker?: false | 'dedicated' | 'shared'; readonly renderer?: import('@gespenst/core').RendererPreference; readonly wasm?: import('@gespenst/core').TerminalOptions['wasm']; readonly callbacksWasm?: import('@gespenst/core').TerminalOptions['callbacksWasm']; }\n" +
+  '/** Full constructor shape accepted by Terminal. */\n' +
+  'export interface GespenstTerminalOptions extends ITerminalOptions, ITerminalInitOnlyOptions { readonly gespenst?: GespenstXtermRuntimeOptions; }\n' +
+  '/** Compiled runtime modules reusable by any number of terminals. */\n' +
+  'export interface PreloadedXtermRuntime { readonly wasm: WebAssembly.Module; readonly callbacksWasm: WebAssembly.Module; }\n' +
+  '/** Compiles and caches both runtime modules. */\n' +
+  "export function preloadXtermRuntime(options?: Pick<GespenstXtermRuntimeOptions, 'wasm' | 'callbacksWasm'>): Promise<PreloadedXtermRuntime>;\n" +
   '/** Keyboard payload emitted by `Terminal.onKey`. */\n' +
   'export interface XtermKeyEvent { readonly key: string; readonly domEvent: KeyboardEvent; }\n' +
   '/** Inclusive viewport row range emitted by `Terminal.onRender`. */\n' +

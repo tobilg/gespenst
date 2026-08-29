@@ -12,11 +12,13 @@ import type {
   ViewportSnapshot,
   WasmSource,
 } from './core/types.js';
+import type { CoreBenchmarkTiming } from './internal/benchmark.js';
+import type { XtermCompatibilityBatch } from './internal/xterm-compatibility.js';
 import type { RendererInfo, RendererPreference, RenderMetrics } from './renderers/hybrid.js';
 import type { TerminalFontFace } from './types.js';
 
 /** Version of the internal main-thread/worker message protocol. */
-export const TERMINAL_PROTOCOL_VERSION = 7 as const;
+export const TERMINAL_PROTOCOL_VERSION = 11 as const;
 
 type WorkerWasmSource = Exclude<WasmSource, Response | URL>;
 
@@ -46,8 +48,15 @@ export interface WorkerInitOptions extends CoreTerminalOptions {
 }
 
 export type MainToWorkerPayload =
-  | { readonly type: 'init'; readonly version: 7; readonly options: WorkerInitOptions }
-  | { readonly type: 'write'; readonly data: ArrayBuffer; readonly requestId?: number }
+  | { readonly type: 'init'; readonly version: 11; readonly options: WorkerInitOptions }
+  | {
+      readonly type: 'write';
+      readonly data: ArrayBuffer;
+      readonly requestId?: number;
+      /** End offsets for the xterm compatibility fragments contained in `data`. */
+      readonly compatibilityBoundaries?: ArrayBuffer;
+      readonly benchmark?: boolean;
+    }
   | {
       readonly type: 'resize';
       readonly cols: number;
@@ -126,7 +135,12 @@ export type WorkerToMainPayload =
       readonly value: TerminalBufferSnapshot;
     }
   | { readonly type: 'fontLoaded'; readonly requestId: number }
-  | { readonly type: 'written'; readonly requestId: number }
+  | {
+      readonly type: 'written';
+      readonly requestId: number;
+      readonly batch?: XtermCompatibilityBatch;
+      readonly timing?: CoreBenchmarkTiming;
+    }
   | { readonly type: 'restored'; readonly requestId: number }
   | { readonly type: 'themed'; readonly requestId: number }
   | { readonly type: 'clipboardEnabled'; readonly requestId: number }

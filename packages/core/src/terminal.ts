@@ -31,6 +31,21 @@ import type {
   ViewportSnapshot,
 } from './core/types.js';
 import {
+  type CoreBenchmarkAccumulator,
+  type CoreBenchmarkTiming,
+  type CoreTerminalBenchmarkHooks,
+  coreBenchmarkTiming,
+  TERMINAL_BENCHMARK_HOOKS,
+} from './internal/benchmark.js';
+import {
+  coalesceXtermCompatibilityBatch,
+  mergeXtermCompatibilityUpdates,
+  XTERM_COMPATIBILITY_BRIDGE,
+  type XtermCompatibilityBatch,
+  type XtermCompatibilityBridge,
+  type XtermCompatibilityUpdate,
+} from './internal/xterm-compatibility.js';
+import {
   type MainToWorkerPayload,
   TERMINAL_PROTOCOL_VERSION,
   type WorkerEventName,
@@ -70,6 +85,17 @@ interface Backend {
   readonly renderer: RendererInfo;
   write(data: Uint8Array): void;
   writeAsync(data: Uint8Array): Promise<void>;
+  writeMeasured(data: Uint8Array): Promise<CoreBenchmarkTiming>;
+  writeCompatibilityAsync(
+    data: Uint8Array,
+    owned: boolean,
+    boundaries: Uint32Array
+  ): Promise<XtermCompatibilityBatch>;
+  writeCompatibilityMeasured(
+    data: Uint8Array,
+    owned: boolean,
+    boundaries: Uint32Array
+  ): Promise<{ readonly batch: XtermCompatibilityBatch; readonly timing: CoreBenchmarkTiming }>;
   resize(cols: number, rows: number, metrics: RenderMetrics): void;
   key(input: KeyInput): void;
   pointer(input: PointerInput): void;
@@ -207,6 +233,17 @@ function cloneSafeWasmSource(
   source: TerminalOptions['wasm']
 ): WorkerInitOptions['wasm'] | undefined {
   return source instanceof URL ? source.href : source;
+}
+
+function* compatibilityRanges(data: Uint8Array, boundaries: Uint32Array): Generator<Uint8Array> {
+  let start = 0;
+  for (const rawEnd of boundaries) {
+    const end = Math.min(data.byteLength, Math.max(start, rawEnd));
+    if (end > start) yield data.subarray(start, end);
+    start = end;
+  }
+  if (start < data.byteLength) yield data.subarray(start);
+  if (data.byteLength === 0 && boundaries.length === 0) yield data;
 }
 
 class WorkerBackend implements Backend {
@@ -356,6 +393,66 @@ class WorkerBackend implements Backend {
   writeAsync(data: Uint8Array): Promise<void> {
     const value = data.slice().buffer;
     return this.request<void>((requestId) => ({ type: 'write', data: value, requestId }), [value]);
+  }
+
+  writeMeasured(data: Uint8Array): Promise<CoreBenchmarkTiming> {
+    const value = data.slice().buffer;
+    return this.request<{ readonly timing: CoreBenchmarkTiming }>(
+      (requestId) => ({ type: 'write', data: value, requestId, benchmark: true }),
+      [value]
+    ).then(({ timing }) => timing);
+  }
+
+  writeCompatibilityAsync(
+    data: Uint8Array,
+    owned: boolean,
+    boundaries: Uint32Array
+  ): Promise<XtermCompatibilityBatch> {
+    const value =
+      owned &&
+      data.byteOffset === 0 &&
+      data.buffer instanceof ArrayBuffer &&
+      data.byteLength === data.buffer.byteLength
+        ? data.buffer
+        : data.slice().buffer;
+    const boundaryData = boundaries.slice().buffer;
+    return this.request<XtermCompatibilityBatch>(
+      (requestId) => ({
+        type: 'write',
+        data: value,
+        requestId,
+        compatibilityBoundaries: boundaryData,
+      }),
+      [value, boundaryData]
+    );
+  }
+
+  writeCompatibilityMeasured(
+    data: Uint8Array,
+    owned: boolean,
+    boundaries: Uint32Array
+  ): Promise<{ readonly batch: XtermCompatibilityBatch; readonly timing: CoreBenchmarkTiming }> {
+    const value =
+      owned &&
+      data.byteOffset === 0 &&
+      data.buffer instanceof ArrayBuffer &&
+      data.byteLength === data.buffer.byteLength
+        ? data.buffer
+        : data.slice().buffer;
+    const boundaryData = boundaries.slice().buffer;
+    return this.request<{
+      readonly batch: XtermCompatibilityBatch;
+      readonly timing: CoreBenchmarkTiming;
+    }>(
+      (requestId) => ({
+        type: 'write',
+        data: value,
+        requestId,
+        compatibilityBoundaries: boundaryData,
+        benchmark: true,
+      }),
+      [value, boundaryData]
+    );
   }
 
   resize(cols: number, rows: number, metrics: RenderMetrics): void {
@@ -518,7 +615,15 @@ class WorkerBackend implements Backend {
     else if (message.type === 'viewport') this.resolve(message.requestId, message.value);
     else if (message.type === 'buffer') this.resolve(message.requestId, message.value);
     else if (message.type === 'fontLoaded') this.resolve(message.requestId, undefined);
-    else if (message.type === 'written') this.resolve(message.requestId, undefined);
+    else if (message.type === 'written')
+      this.resolve(
+        message.requestId,
+        message.timing
+          ? message.batch
+            ? { batch: message.batch, timing: message.timing }
+            : { timing: message.timing }
+          : message.batch
+      );
     else if (message.type === 'restored') this.resolve(message.requestId, undefined);
     else if (message.type === 'themed') this.resolve(message.requestId, undefined);
     else if (message.type === 'clipboardEnabled') this.resolve(message.requestId, undefined);
@@ -577,7 +682,9 @@ class LocalBackend implements Backend {
   private renderPending = false;
   private disposed = false;
   private readonly renderWaiters: Array<{
-    readonly resolve: () => void;
+    readonly compatibility: boolean;
+    readonly benchmark?: CoreBenchmarkAccumulator;
+    readonly resolve: (update: XtermCompatibilityUpdate | undefined) => void;
     readonly reject: (error: Error) => void;
   }> = [];
   private readonly runtime: CoreRuntime;
@@ -680,6 +787,52 @@ class LocalBackend implements Backend {
   async writeAsync(data: Uint8Array): Promise<void> {
     this.terminal.write(data);
     await this.scheduleRender();
+  }
+  async writeMeasured(data: Uint8Array): Promise<CoreBenchmarkTiming> {
+    const benchmark = this.startBenchmark();
+    const parseStartedAt = performance.now();
+    this.terminal.write(data);
+    benchmark.parseMs = performance.now() - parseStartedAt;
+    benchmark.scheduledAt = performance.now();
+    await this.scheduleRender(false, benchmark);
+    return coreBenchmarkTiming(benchmark);
+  }
+  async writeCompatibilityAsync(
+    data: Uint8Array,
+    _owned: boolean,
+    boundaries: Uint32Array
+  ): Promise<XtermCompatibilityBatch> {
+    const updates: XtermCompatibilityUpdate[] = [];
+    this.terminal.beginXtermCompatibilityBatch();
+    for (const part of compatibilityRanges(data, boundaries)) {
+      this.terminal.write(part);
+      updates.push(this.terminal.xtermCompatibilityUpdate());
+    }
+    this.scheduleRender();
+    return coalesceXtermCompatibilityBatch(updates);
+  }
+  async writeCompatibilityMeasured(
+    data: Uint8Array,
+    _owned: boolean,
+    boundaries: Uint32Array
+  ): Promise<{ readonly batch: XtermCompatibilityBatch; readonly timing: CoreBenchmarkTiming }> {
+    const benchmark = this.startBenchmark();
+    const updates: XtermCompatibilityUpdate[] = [];
+    this.terminal.beginXtermCompatibilityBatch();
+    for (const part of compatibilityRanges(data, boundaries)) {
+      const parseStartedAt = performance.now();
+      this.terminal.write(part);
+      benchmark.parseMs += performance.now() - parseStartedAt;
+      const compatibilityStartedAt = performance.now();
+      updates.push(this.terminal.xtermCompatibilityUpdate());
+      benchmark.compatibilityMs += performance.now() - compatibilityStartedAt;
+    }
+    benchmark.scheduledAt = performance.now();
+    this.scheduleRender();
+    return {
+      batch: coalesceXtermCompatibilityBatch(updates),
+      timing: coreBenchmarkTiming(benchmark),
+    };
   }
   resize(cols: number, rows: number, metrics: RenderMetrics): void {
     this.terminal.resize(cols, rows, metrics.cellWidth, metrics.cellHeight);
@@ -784,9 +937,17 @@ class LocalBackend implements Backend {
     this.runtime.dispose();
   }
 
-  private scheduleRender(): Promise<void> {
-    const rendered = new Promise<void>((resolve, reject) =>
-      this.renderWaiters.push({ resolve, reject })
+  private scheduleRender(
+    compatibility = false,
+    benchmark?: CoreBenchmarkAccumulator
+  ): Promise<XtermCompatibilityUpdate | undefined> {
+    const rendered = new Promise<XtermCompatibilityUpdate | undefined>((resolve, reject) =>
+      this.renderWaiters.push({
+        compatibility,
+        ...(benchmark ? { benchmark } : {}),
+        resolve,
+        reject,
+      })
     );
     // Most mutations schedule opportunistically; keep their disposal rejection observed while
     // preserving rejection for callers that explicitly await the returned boundary.
@@ -800,9 +961,27 @@ class LocalBackend implements Backend {
   private async renderFrame(): Promise<void> {
     if (this.disposed) return;
     try {
+      const updates: XtermCompatibilityUpdate[] = [];
+      const renderStartedAt = performance.now();
       while (true) {
+        const iterationStartedAt = performance.now();
+        const iterationWaiters = [...this.renderWaiters];
+        for (const waiter of iterationWaiters) {
+          if (!waiter.benchmark || waiter.benchmark.renderStartedAt !== 0) continue;
+          waiter.benchmark.renderWaitMs = iterationStartedAt - waiter.benchmark.scheduledAt;
+          waiter.benchmark.renderStartedAt = iterationStartedAt;
+        }
         const waiterCount = this.renderWaiters.length;
         const frame = this.terminal.render();
+        if (this.renderWaiters.some((waiter) => waiter.compatibility)) {
+          const compatibilityStartedAt = performance.now();
+          updates.push(this.terminal.xtermCompatibilityUpdate());
+          const compatibilityMs = performance.now() - compatibilityStartedAt;
+          for (const waiter of iterationWaiters) {
+            if (waiter.compatibility && waiter.benchmark)
+              waiter.benchmark.compatibilityMs += compatibilityMs;
+          }
+        }
         await this.painter.render(frame);
         if (this.disposed) return;
         // A write may arrive while an asynchronous renderer recovery is in progress. Render the
@@ -810,13 +989,20 @@ class LocalBackend implements Backend {
         if (this.renderWaiters.length === waiterCount) break;
       }
       const waiters = this.renderWaiters.splice(0);
+      const renderCompletedAt = performance.now();
+      for (const waiter of waiters) {
+        if (!waiter.benchmark) continue;
+        waiter.benchmark.renderMs =
+          renderCompletedAt - (waiter.benchmark.renderStartedAt || renderStartedAt);
+      }
       this.renderPending = false;
-      this.events.rendered(this.terminal.bufferState());
+      const update = updates.length > 0 ? mergeXtermCompatibilityUpdates(updates) : undefined;
+      this.events.rendered(update?.state ?? this.terminal.bufferState());
       if (this.accessibility) {
         const viewport = this.terminal.viewport();
         this.events.a11y(viewport.viewportRows.map((row) => row.text));
       }
-      for (const waiter of waiters) waiter.resolve();
+      for (const waiter of waiters) waiter.resolve(waiter.compatibility ? update : undefined);
     } catch (error) {
       if (this.disposed) return;
       const failure = error instanceof Error ? error : new Error(String(error));
@@ -825,6 +1011,18 @@ class LocalBackend implements Backend {
       for (const waiter of waiters) waiter.reject(failure);
       this.events.error(failure);
     }
+  }
+
+  private startBenchmark(): CoreBenchmarkAccumulator {
+    return {
+      parseMs: 0,
+      scheduledAt: 0,
+      renderWaitMs: 0,
+      renderMs: 0,
+      compatibilityMs: 0,
+      backendStartedAt: performance.now(),
+      renderStartedAt: 0,
+    };
   }
 }
 
@@ -864,6 +1062,34 @@ export class GespenstTerminal implements BrowserTerminal {
   private themeValue: TerminalTheme;
   private clipboardToken = 0;
   private clipboardActive = false;
+  private readonly encoder = new TextEncoder();
+  private readonly compatibilityInputListeners = new Set<
+    (data: string | Uint8Array, source: InputSource) => void
+  >();
+
+  /** @internal Runtime-only capability used by the version-matched xterm adapter. */
+  readonly [XTERM_COMPATIBILITY_BRIDGE]: XtermCompatibilityBridge = {
+    onInput: (listener) => {
+      this.compatibilityInputListeners.add(listener);
+      return { dispose: () => this.compatibilityInputListeners.delete(listener) };
+    },
+    writeAsync: async (data, owned, boundaries) => {
+      this.ensureActive();
+      const batch = await this.backend.writeCompatibilityAsync(data, owned, boundaries);
+      this.ensureActive();
+      this.events.emit('writeParsed', undefined);
+      this.events.emit('bufferChange', { reason: 'write' });
+      return batch;
+    },
+    writeMeasured: async (data, owned, boundaries) => {
+      this.ensureActive();
+      const result = await this.backend.writeCompatibilityMeasured(data, owned, boundaries);
+      this.ensureActive();
+      this.events.emit('writeParsed', undefined);
+      this.events.emit('bufferChange', { reason: 'write' });
+      return result;
+    },
+  };
 
   private constructor(
     dom: TerminalDom,
@@ -888,6 +1114,24 @@ export class GespenstTerminal implements BrowserTerminal {
     };
     this.events = events;
     this.element = dom.root;
+    const benchmarkHooks: CoreTerminalBenchmarkHooks = {
+      write: async (data) => {
+        this.ensureActive();
+        const timing = await this.backend.writeMeasured(
+          typeof data === 'string' ? this.encoder.encode(data) : data
+        );
+        this.ensureActive();
+        this.events.emit('writeParsed', undefined);
+        this.events.emit('bufferChange', { reason: 'write' });
+        return { timing };
+      },
+    };
+    Object.defineProperty(this, TERMINAL_BENCHMARK_HOOKS, {
+      configurable: false,
+      enumerable: false,
+      value: benchmarkHooks,
+      writable: false,
+    });
     this.applyInputFont();
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(dom.root);
@@ -917,7 +1161,8 @@ export class GespenstTerminal implements BrowserTerminal {
       let terminal: GespenstTerminal | null = null;
       const backendEvents: BackendEvents = {
         input(data, source) {
-          events.emit('input', { data, source });
+          if (terminal) terminal.handleInput(data, source);
+          else events.emit('input', { data, source });
         },
         event(name, value) {
           events.emit(name, value as never);
@@ -987,14 +1232,18 @@ export class GespenstTerminal implements BrowserTerminal {
   /** Queues terminal output for VT parsing without waiting for the next rendered frame. */
   write(data: string | Uint8Array): void {
     this.ensureActive();
-    this.backend.write(typeof data === 'string' ? new TextEncoder().encode(data) : data);
+    this.backend.write(typeof data === 'string' ? this.encoder.encode(data) : data);
     this.events.emit('bufferChange', { reason: 'write' });
   }
 
   /** Parses and renders terminal output before resolving. */
   async writeAsync(data: string | Uint8Array): Promise<void> {
+    await this.writeAndRender(typeof data === 'string' ? this.encoder.encode(data) : data);
+  }
+
+  private async writeAndRender(data: Uint8Array): Promise<void> {
     this.ensureActive();
-    await this.backend.writeAsync(typeof data === 'string' ? new TextEncoder().encode(data) : data);
+    await this.backend.writeAsync(data);
     this.ensureActive();
     this.events.emit('writeParsed', undefined);
     this.events.emit('bufferChange', { reason: 'write' });
@@ -1014,7 +1263,11 @@ export class GespenstTerminal implements BrowserTerminal {
   /** Sends composed text toward the PTY. */
   sendText(data: string): void {
     this.ensureActive();
-    this.backend.text(data);
+    // Composed text is already the exact UTF-8 payload expected by the PTY. Keep it on the main
+    // thread instead of paying a worker round trip through Ghostty's identity text encoder.
+    for (const listener of this.compatibilityInputListeners) listener(data, 'text');
+    if (this.events.hasListeners('input'))
+      this.events.emit('input', { data: this.encoder.encode(data), source: 'text' });
   }
   /** Sends text through bracketed-paste handling when enabled. */
   paste(data: string): void {
@@ -1391,6 +1644,7 @@ export class GespenstTerminal implements BrowserTerminal {
     this.fontFaces.clear();
     for (const cleanup of this.cleanups.splice(0)) cleanup();
     this.backend.dispose();
+    this.compatibilityInputListeners.clear();
     this.events.clear();
     this.dom.root.remove();
   }
@@ -1490,6 +1744,11 @@ export class GespenstTerminal implements BrowserTerminal {
       this.events.emit('scroll', state.viewportY);
     }
     this.events.emit('viewportChange', { revision: state.revision, state });
+  }
+
+  private handleInput(data: Uint8Array, source: InputSource): void {
+    for (const listener of this.compatibilityInputListeners) listener(data, source);
+    this.events.emit('input', { data, source });
   }
 
   private positionInputAtCursor(state: TerminalBufferState): void {

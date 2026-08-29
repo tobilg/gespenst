@@ -6,6 +6,15 @@ import {
   createCoreRuntime,
   type Disposable,
 } from '../core/index.js';
+import { type CoreBenchmarkAccumulator, coreBenchmarkTiming } from '../internal/benchmark.js';
+import {
+  coalesceXtermCompatibilityBatch,
+  compactXtermCompatibilityBatch,
+  mergeXtermCompatibilityUpdates,
+  type XtermCompatibilityBatch,
+  type XtermCompatibilityUpdate,
+  xtermCompatibilityBatchTransferables,
+} from '../internal/xterm-compatibility.js';
 import {
   type MainToWorkerMessage,
   TERMINAL_PROTOCOL_VERSION,
@@ -23,7 +32,9 @@ interface WorkerSession {
   metrics: RenderMetrics;
   renderPending: boolean;
   readonly renderWaiters: Array<{
-    readonly resolve: () => void;
+    readonly compatibility: boolean;
+    readonly benchmark?: CoreBenchmarkAccumulator;
+    readonly resolve: (update: XtermCompatibilityUpdate | undefined) => void;
     readonly reject: (error: Error) => void;
   }>;
   accessibility: boolean;
@@ -91,10 +102,61 @@ export class TerminalWorkerHost {
     const terminal = session.terminal;
 
     if (message.type === 'write') {
-      terminal.write(new Uint8Array(message.data));
-      await this.scheduleRender(session);
-      if (message.requestId !== undefined)
-        this.post(session.id, { type: 'written', requestId: message.requestId });
+      const benchmark: CoreBenchmarkAccumulator | undefined = message.benchmark
+        ? {
+            parseMs: 0,
+            scheduledAt: 0,
+            renderWaitMs: 0,
+            renderMs: 0,
+            compatibilityMs: 0,
+            backendStartedAt: performance.now(),
+            renderStartedAt: 0,
+          }
+        : undefined;
+      const data = new Uint8Array(message.data);
+      let batch: XtermCompatibilityBatch | undefined;
+      if (message.compatibilityBoundaries) {
+        const updates: XtermCompatibilityUpdate[] = [];
+        const boundaries = new Uint32Array(message.compatibilityBoundaries);
+        terminal.beginXtermCompatibilityBatch();
+        let start = 0;
+        for (let index = 0; index <= boundaries.length; index += 1) {
+          const requestedEnd = index < boundaries.length ? boundaries[index] : data.byteLength;
+          const end = Math.min(data.byteLength, Math.max(start, requestedEnd ?? data.byteLength));
+          if (end === start && data.byteLength > 0) continue;
+          const parseStartedAt = performance.now();
+          terminal.write(data.subarray(start, end));
+          if (benchmark) benchmark.parseMs += performance.now() - parseStartedAt;
+          const compatibilityStartedAt = performance.now();
+          updates.push(terminal.xtermCompatibilityUpdate());
+          if (benchmark) benchmark.compatibilityMs += performance.now() - compatibilityStartedAt;
+          start = end;
+          if (end === data.byteLength) break;
+        }
+        batch = compactXtermCompatibilityBatch(coalesceXtermCompatibilityBatch(updates));
+        if (benchmark) benchmark.scheduledAt = performance.now();
+        void this.scheduleRender(session);
+      } else {
+        const parseStartedAt = performance.now();
+        terminal.write(data);
+        if (benchmark) {
+          benchmark.parseMs = performance.now() - parseStartedAt;
+          benchmark.scheduledAt = performance.now();
+        }
+        await this.scheduleRender(session, false, benchmark);
+      }
+      if (message.requestId !== undefined) {
+        this.post(
+          session.id,
+          {
+            type: 'written',
+            requestId: message.requestId,
+            ...(batch ? { batch } : {}),
+            ...(benchmark ? { timing: coreBenchmarkTiming(benchmark) } : {}),
+          },
+          batch ? xtermCompatibilityBatchTransferables(batch) : []
+        );
+      }
       return;
     }
     if (message.type === 'resize') {
@@ -299,9 +361,18 @@ export class TerminalWorkerHost {
     this.runtimeKey = null;
   }
 
-  private scheduleRender(session: WorkerSession): Promise<void> {
-    const rendered = new Promise<void>((resolve, reject) =>
-      session.renderWaiters.push({ resolve, reject })
+  private scheduleRender(
+    session: WorkerSession,
+    compatibility = false,
+    benchmark?: CoreBenchmarkAccumulator
+  ): Promise<XtermCompatibilityUpdate | undefined> {
+    const rendered = new Promise<XtermCompatibilityUpdate | undefined>((resolve, reject) =>
+      session.renderWaiters.push({
+        compatibility,
+        ...(benchmark ? { benchmark } : {}),
+        resolve,
+        reject,
+      })
     );
     void rendered.catch(() => undefined);
     if (session.renderPending) return rendered;
@@ -309,20 +380,46 @@ export class TerminalWorkerHost {
     const run = async () => {
       if (!this.sessions.has(session.id)) {
         session.renderPending = false;
-        for (const waiter of session.renderWaiters.splice(0)) waiter.resolve();
+        for (const waiter of session.renderWaiters.splice(0))
+          waiter.reject(new Error('Terminal worker session was disposed before rendering'));
         return;
       }
       try {
+        const updates: XtermCompatibilityUpdate[] = [];
+        const renderStartedAt = performance.now();
         while (true) {
+          const iterationStartedAt = performance.now();
+          const iterationWaiters = [...session.renderWaiters];
+          for (const waiter of iterationWaiters) {
+            if (!waiter.benchmark || waiter.benchmark.renderStartedAt !== 0) continue;
+            waiter.benchmark.renderWaitMs = iterationStartedAt - waiter.benchmark.scheduledAt;
+            waiter.benchmark.renderStartedAt = iterationStartedAt;
+          }
           const waiterCount = session.renderWaiters.length;
           const frame = session.terminal.render();
+          if (session.renderWaiters.some((waiter) => waiter.compatibility)) {
+            const compatibilityStartedAt = performance.now();
+            updates.push(session.terminal.xtermCompatibilityUpdate());
+            const compatibilityMs = performance.now() - compatibilityStartedAt;
+            for (const waiter of iterationWaiters) {
+              if (waiter.compatibility && waiter.benchmark)
+                waiter.benchmark.compatibilityMs += compatibilityMs;
+            }
+          }
           await session.renderer.render(frame);
           if (!this.sessions.has(session.id)) return;
           if (session.renderWaiters.length === waiterCount) break;
         }
         const waiters = session.renderWaiters.splice(0);
+        const renderCompletedAt = performance.now();
+        for (const waiter of waiters) {
+          if (!waiter.benchmark) continue;
+          waiter.benchmark.renderMs =
+            renderCompletedAt - (waiter.benchmark.renderStartedAt || renderStartedAt);
+        }
         session.renderPending = false;
-        const state = session.terminal.bufferState();
+        const update = updates.length > 0 ? mergeXtermCompatibilityUpdates(updates) : undefined;
+        const state = update?.state ?? session.terminal.bufferState();
         this.post(session.id, { type: 'rendered', state });
         if (session.accessibility) {
           const viewport = session.terminal.viewport();
@@ -331,7 +428,7 @@ export class TerminalWorkerHost {
             rows: viewport.viewportRows.map((row) => row.text),
           });
         }
-        for (const waiter of waiters) waiter.resolve();
+        for (const waiter of waiters) waiter.resolve(waiter.compatibility ? update : undefined);
       } catch (error) {
         if (!this.sessions.has(session.id)) return;
         const failure = error instanceof Error ? error : new Error(String(error));

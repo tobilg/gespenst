@@ -180,6 +180,11 @@ socket.onmessage = (event) => terminal.write(event.data);
 await terminal.ready;
 ```
 
+For applications that create multiple terminals, `preloadXtermRuntime()` compiles both WASM
+artifacts ahead of time. Native worker and renderer controls are available under the constructor's
+nested `gespenst` option without changing the xterm.js option surface; see the
+[`@gespenst/xterm` guide](./packages/xterm/README.md#runtime-and-performance-controls).
+
 The package copies the xterm.js 6.0 stable public declarations, so existing TypeScript integrations
 can change their import without adding xterm.js at runtime. Initialization is asynchronous under the
 hood; synchronous xterm methods queue safely, while `ready` and `native` expose explicit boundaries.
@@ -250,6 +255,7 @@ pnpm security:audit
 pnpm build
 pnpm test:pack
 pnpm bench:throughput
+pnpm bench:browser -- --profile ci
 ```
 
 The workspace uses pnpm, TypeScript 7, Vite 8, Vitest, and lockstep package versions.
@@ -261,8 +267,7 @@ an environment-protected workflow, and npm trusted publishing rather than a long
 `pnpm test:published` creates an isolated temporary consumer, resolves every public
 `@gespenst/*` package from npm at `latest`, rejects workspace links, runs strict bundler and
 NodeNext consumer checks, and exercises the packages in desktop and mobile browser profiles. It
-also compares the published native and xterm-compatible terminals with the latest upstream
-`@xterm/xterm`; timings are diagnostic reports, not release gates.
+is a functional release check and does not collect performance timings.
 
 ```sh
 pnpm test:published
@@ -276,6 +281,18 @@ command serves the same registry-installed consumer locally; add `--host` to tes
 LAN, and stop it as soon as testing is complete because the harness exposes a real local PTY while
 it is running. See the [published-package harness guide](harness/published/README.md) for scenario,
 browser, and benchmark methodology.
+
+`pnpm bench:browser` is the isolated, visible-browser performance runner. By default it compares
+workspace tarballs with `npm:latest` and upstream `@xterm/xterm@6.0.0`; use `--candidate` and
+`--baseline` with either `workspace` or `npm:<selector>`. It records exact package provenance,
+hardware and browser details, cold and warm initialization, parser/callback/render/presentation
+boundaries, realistic bulk and streaming workloads, input, resize, and scrollback costs. Reports
+with raw samples, percentiles, variance, bootstrap confidence intervals, and normalized ratios are
+written to `test-results/benchmarks/<timestamp>/`. Multi-browser runs checkpoint the report after
+each completed engine, retry pages whose frame cadence fails validation, and time out stalled pages.
+The full profile preloads its complete 100k-row scrollback case but bounds repeated trim sampling so
+that case cannot dominate the run indefinitely. CI runs the short report-only profile and never uses
+a performance number as a release gate.
 
 `pnpm test:coverage` runs the Node and Chromium projects together with V8 instrumentation, prints a
 combined summary, and writes browsable HTML, LCOV, and JSON reports to `coverage/`. Open

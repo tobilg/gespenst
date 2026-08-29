@@ -22,7 +22,9 @@ pnpm test:published -- --keep
 ```
 
 Available profiles are `chromium`, `firefox`, `webkit`, `mobile-chromium`, and `mobile-webkit`.
-Chromium runs the performance comparison in addition to functional scenarios.
+Automated published-package validation is deliberately functional-only; performance has its own
+runner so package installation checks and noisy timing diagnostics cannot be mistaken for one
+another.
 
 Start the inspectable UI without Playwright automation:
 
@@ -53,17 +55,42 @@ adding coverage makes the harness fail before installation.
 
 ## Performance comparison
 
-Each implementation runs in a fresh same-origin iframe to isolate globals and terminal state:
+Run the reproducible browser benchmark separately:
 
-- published native Gespenst with recommended defaults;
-- published native Gespenst forced to main-thread Canvas2D;
-- published `@gespenst/xterm` with recommended defaults;
-- the latest published upstream `@xterm/xterm`.
+```sh
+pnpm bench:browser
+pnpm bench:browser -- --profile ci
+pnpm bench:browser -- --candidate npm:next --baseline npm:latest --browser chromium,firefox
+```
 
-The runner records cold and warm initialization, 64 KiB and 1 MiB ASCII/ANSI/Unicode writes,
-resize and reflow, input callback throughput, production bundle sizes, and memory when the browser
-exposes `measureUserAgentSpecificMemory()`. It takes three warm-up samples and ten reported samples
-for repeated cases and reports median, p95, minimum, maximum, and raw observations.
+The defaults compare workspace archives with exact packages resolved from npm's `latest` tag and
+upstream `@xterm/xterm@6.0.0`. Both Gespenst inputs accept either `workspace` or
+`npm:<version-or-tag>`. The runner builds isolated consumers and records the resolved package
+versions, npm integrity or workspace archive hashes, git revision and dirty state, browser version,
+CPU, OS, memory, sample profile, seed, and randomized implementation order.
+
+Each implementation runs on a visible, fixed-size page in a fresh browser context:
+
+- candidate native Gespenst with product defaults and forced main-thread Canvas2D;
+- candidate `@gespenst/xterm`, with and without representative listeners and a parser hook;
+- the selected published Gespenst baseline using native and xterm-compatible APIs;
+- the selected upstream `@xterm/xterm`, with and without the same listener load.
+
+The workloads cover fresh-context cold startup, warm initialization, 32 B through 16 KiB latency,
+calibrated 1 MiB (`ci`) or 10 MiB (`full`) ASCII/ANSI/Unicode/redraw throughput, parser and callback
+boundaries, rendering through the following animation frame, burst and paced 1 KiB/16 KiB streams,
+single and batched resize, DOM text input, and real append-and-trim work with 1,000, 10,000, and (in
+`full`) 100,000 retained rows. Candidate-only symbol hooks expose parse, render wait, render,
+compatibility-delta, adapter, buffer-sync, and callback timings without adding a supported public
+API. Published versions without those hooks still run through their public completion callbacks.
+
+The page first validates that it is visible and samples animation-frame cadence. Results include
+raw observations, p05/median/p95, mean, standard deviation, coefficient of variation, deterministic
+bootstrap 95% confidence intervals for the median, tail values, and warnings for unstable or
+timer-quantized samples. Where the browser supports it, reports also include long-task counts,
+total duration, and longest duration per implementation. Normalized comparisons always use
+“greater than 1 is faster” and retain the underlying samples. The `ci` profile is report-only:
+infrastructure or correctness failures fail the job, but no performance value blocks a release.
 
 These measurements are diagnostic, not universal rankings or CI gates. Browser scheduling,
 renderer selection, GPU and driver state, fonts, thermals, and the different public completion
@@ -79,5 +106,9 @@ Automated results are written to `test-results/published/<timestamp>/`:
 - `summary.md` is the concise human-readable report;
 - `<browser>.json` preserves each browser result;
 - a screenshot and Playwright trace are retained for a failed browser profile.
+
+Browser benchmark results are written independently to `test-results/benchmarks/<timestamp>/` as
+`report.json`, `summary.md`, and long-form `samples.csv`. CI uploads that directory as an artifact
+and appends the Markdown report to the job summary.
 
 The temporary consumer is removed by default. Pass `--keep` to print and preserve its path.

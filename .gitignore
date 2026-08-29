@@ -147,6 +147,7 @@ external-projects/
 plans/
 .release/
 test-results/published/
+test-results/benchmarks/
 
 # Generated documentation assets and TypeDoc API reference. `_headers` is hand-authored and must
 # stay tracked: it is the deployed site's cross-origin isolation policy.

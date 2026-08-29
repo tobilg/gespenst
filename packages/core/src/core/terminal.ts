@@ -1,3 +1,4 @@
+import type { XtermCompatibilityUpdate } from '../internal/xterm-compatibility.js';
 import type { Allocation, GhosttyBindings } from './bindings.js';
 import { BufferReader } from './buffer.js';
 import { TypedEventEmitter } from './events.js';
@@ -37,6 +38,7 @@ import type {
   TerminalTheme,
   ViewportSnapshot,
 } from './types.js';
+import { XtermCompatibilityReader } from './xterm-reader.js';
 
 type Effect =
   | { readonly type: 'input'; readonly data: Uint8Array }
@@ -69,6 +71,7 @@ export class CoreTerminal implements Disposable {
   private handle: number;
   private readonly inputEncoder: InputEncoder;
   private readonly renderReader: RenderReader;
+  private readonly xtermReader: XtermCompatibilityReader;
   private readonly bufferReader: BufferReader;
   private readonly pointerController: PointerController;
   private readonly events = new TypedEventEmitter<TerminalEventMap>();
@@ -79,6 +82,9 @@ export class CoreTerminal implements Disposable {
   private disposed = false;
   private writing = false;
   private revision = 0;
+  private xtermPreviousState: TerminalBufferState | null = null;
+  private xtermPreviousAnchorId = -1;
+  private xtermPreviousAnchorIndex = -1;
   private _geometry: TerminalGeometry;
   private readonly host: TerminalHost;
   private clipboardEnabled = false;
@@ -104,6 +110,7 @@ export class CoreTerminal implements Disposable {
     );
     this.inputEncoder = new InputEncoder(host.bindings);
     this.renderReader = new RenderReader(host.bindings);
+    this.xtermReader = new XtermCompatibilityReader(host.bindings);
     this.bufferReader = new BufferReader(host.bindings);
     this.pointerController = new PointerController(host.bindings);
     this._geometry = {
@@ -208,6 +215,93 @@ export class CoreTerminal implements Disposable {
     return frame;
   }
 
+  /** Reads one compact xterm compatibility delta without constructing painter cells. @internal */
+  xtermCompatibilityUpdate(): XtermCompatibilityUpdate {
+    this.ensureActive();
+    const state = this.bufferReader.state(this.handle, this.revision);
+    const packed = this.xtermReader.read(this.handle, state, this.bufferReader);
+    const previous = this.xtermPreviousState;
+    let reset = !previous || previous.screen !== state.screen;
+    let trimmed = 0;
+    if (!reset && previous) {
+      let retainedIndex = -1;
+      const predictedOffset = this.xtermPreviousAnchorIndex - state.viewportY;
+      if (
+        this.xtermPreviousAnchorId >= 0 &&
+        predictedOffset >= 0 &&
+        predictedOffset < state.viewportLength &&
+        this.bufferReader.selectCompatibilityRow(this.handle, state.viewportY + predictedOffset) ===
+          this.xtermPreviousAnchorId
+      )
+        retainedIndex = state.viewportY + predictedOffset;
+      if (retainedIndex < 0 && this.xtermPreviousAnchorId >= 0) {
+        for (let offset = 0; offset < state.viewportLength; offset += 1) {
+          if (offset === predictedOffset) continue;
+          const index = state.viewportY + offset;
+          if (
+            this.bufferReader.selectCompatibilityRow(this.handle, index) !==
+            this.xtermPreviousAnchorId
+          )
+            continue;
+          retainedIndex = index;
+          break;
+        }
+      }
+      if (retainedIndex >= 0) trimmed = Math.max(0, this.xtermPreviousAnchorIndex - retainedIndex);
+      else if (
+        state.totalRows !== previous.totalRows ||
+        state.viewportY !== previous.viewportY ||
+        packed.dirty === 'full'
+      )
+        reset = true;
+    }
+    const appended = reset
+      ? state.totalRows
+      : Math.max(0, state.totalRows - (previous?.totalRows ?? 0) + trimmed);
+    const appendStart = Math.max(0, state.totalRows - appended);
+    this.xtermPreviousState = state;
+    this.captureXtermAnchor(state);
+    const rows = [...packed.rows];
+    const requiredStart = reset ? 0 : appendStart;
+    if (requiredStart < state.totalRows) {
+      const present = new Set(rows.map((row) => row.index));
+      let missingStart = -1;
+      for (let index = requiredStart; index <= state.totalRows; index += 1) {
+        if (index < state.totalRows && !present.has(index)) {
+          if (missingStart < 0) missingStart = index;
+          continue;
+        }
+        if (missingStart < 0) continue;
+        rows.push(...this.bufferReader.compatibilityRows(this.handle, missingStart, index));
+        missingStart = -1;
+      }
+      rows.sort((left, right) => left.index - right.index);
+    }
+    return {
+      state,
+      dirty: packed.dirty,
+      trimmed,
+      appendStart,
+      reset,
+      rows,
+    };
+  }
+
+  /** Captures the authoritative pre-write anchor used by the xterm compatibility journal. */
+  beginXtermCompatibilityBatch(): void {
+    this.ensureActive();
+    const state = this.bufferReader.state(this.handle, this.revision);
+    this.xtermPreviousState = state;
+    this.captureXtermAnchor(state);
+  }
+
+  private captureXtermAnchor(state: TerminalBufferState): void {
+    const index = state.viewportY + state.viewportLength - 1;
+    this.xtermPreviousAnchorIndex = index;
+    this.xtermPreviousAnchorId =
+      state.viewportLength > 0 ? this.bufferReader.selectCompatibilityRow(this.handle, index) : -1;
+  }
+
   /** Reads a complete visible viewport snapshot. */
   viewport(): ViewportSnapshot {
     this.ensureActive();
@@ -223,7 +317,7 @@ export class CoreTerminal implements Disposable {
   /** Changes the retained scrollback capacity without resetting terminal contents. */
   setScrollbackLines(lines: number): void {
     this.ensureActive();
-    this.setScalarOption('SCROLLBACK_MAX_LINES', lines);
+    this.applyScrollbackLimit(lines);
     this.revision += 1;
   }
 
@@ -638,6 +732,7 @@ export class CoreTerminal implements Disposable {
     this.host.unregister(this.id);
     this.inputEncoder.dispose();
     this.renderReader.dispose();
+    this.xtermReader.dispose();
     this.bufferReader.dispose();
     this.pointerController.dispose(this.handle);
     this.host.bindings.exports.ghostty_terminal_free(this.handle);
@@ -681,8 +776,7 @@ export class CoreTerminal implements Disposable {
       this.setScalarOption('CLIPBOARD_WRITE_MAX_BYTES', this.clipboardMaxBytes);
     }
     this.setOption('COLOR_SCHEME', callbacks.colorScheme);
-    if (scrollbackLines !== undefined)
-      this.setScalarOption('SCROLLBACK_MAX_LINES', scrollbackLines);
+    if (scrollbackLines !== undefined) this.applyScrollbackLimit(scrollbackLines);
     if (cursorStyle !== undefined) this.setDefaultCursor(cursorStyle, cursorBlink ?? false);
     this.applyTheme();
   }
@@ -917,6 +1011,15 @@ export class CoreTerminal implements Disposable {
     } finally {
       allocation.free();
     }
+  }
+
+  private applyScrollbackLimit(lines: number): void {
+    const normalized = Math.max(0, Math.floor(lines));
+    // Ghostty's line limit trims at page boundaries. Its byte limit has an explicit zero mode
+    // that disables history immediately, which is required for xterm's `scrollback: 0` contract.
+    if (normalized === 0) this.setScalarOption('SCROLLBACK_MAX_BYTES', 0);
+    else this.setOption('SCROLLBACK_MAX_BYTES', 0);
+    this.setScalarOption('SCROLLBACK_MAX_LINES', normalized);
   }
 
   private setOption(name: string, value: number): void {

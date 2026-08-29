@@ -408,7 +408,7 @@ import { createTerminal } from '@gespenst/core';
 import '@gespenst/core/style.css';
 import { ClipboardAddon } from '@gespenst/clipboard';
 import { BrowserShellAddon } from '@gespenst/shell';
-import { Terminal } from '@gespenst/xterm';
+import { preloadXtermRuntime, Terminal } from '@gespenst/xterm';
 import '@gespenst/xterm/css/xterm.css';
 
 globalThis.__gespenstPackedTest = (async () => {
@@ -457,7 +457,12 @@ globalThis.__gespenstPackedTest = (async () => {
   const shellReady = await browserShell.ready;
   const shellText = await waitForText(shellTerminal, 'package $ ');
 
-  const xterm = new Terminal({ cols: 32, rows: 6 });
+  const xtermRuntime = await preloadXtermRuntime();
+  const xterm = new Terminal({
+    cols: 32,
+    rows: 6,
+    gespenst: { ...xtermRuntime, renderer: 'canvas2d' },
+  });
   xterm.open(xtermHost);
   await xterm.ready;
   await new Promise((resolve) => xterm.write('packed xterm \\u754c\\ud83d\\ude42', resolve));

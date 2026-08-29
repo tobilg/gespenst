@@ -13,6 +13,7 @@ export class ParserApi implements IParser {
   private readonly osc = new Map<number, OscHandler[]>();
   private pending = '';
   private readonly decoder = new TextDecoder();
+  private decoderStreaming = false;
 
   get active(): boolean {
     return this.csi.size + this.dcs.size + this.esc.size + this.osc.size > 0;
@@ -37,40 +38,58 @@ export class ParserApi implements IParser {
 
   async process(data: string | Uint8Array): Promise<string | Uint8Array> {
     if (!this.active) return data;
+    if (
+      !this.decoderStreaming &&
+      this.pending.length === 0 &&
+      data instanceof Uint8Array &&
+      !containsEscape(data)
+    )
+      return data;
+    const hadPending = this.pending.length > 0;
+    if (data instanceof Uint8Array) this.decoderStreaming = true;
     const input =
       this.pending +
       (typeof data === 'string' ? data : this.decoder.decode(data, { stream: true }));
     this.pending = '';
-    let output = '';
+    const output: string[] = [];
+    // Streaming UTF-8 decoding can retain an incomplete suffix, so byte input must keep the
+    // decoded output path even when no registered handler consumes a control sequence.
+    let changed = hadPending || typeof data !== 'string';
     let offset = 0;
     while (offset < input.length) {
       const start = input.indexOf('\x1b', offset);
       if (start === -1) {
-        output += input.slice(offset);
+        output.push(input.slice(offset));
         break;
       }
-      output += input.slice(offset, start);
+      output.push(input.slice(offset, start));
       const parsed = parseSequence(input, start);
       if (!parsed) {
         this.pending = input.slice(start);
+        changed = true;
         if (this.pending.length > 10 * 1024 * 1024)
           throw new Error('Custom parser sequence exceeded 10 MiB');
         break;
       }
       let handled = false;
       if (parsed.kind === 'csi') {
-        handled = await invoke(this.csi.get(parsed.key), parsed.params);
+        const result = invoke(this.csi.get(parsed.key), parsed.params);
+        handled = typeof result === 'boolean' ? result : await result;
       } else if (parsed.kind === 'dcs') {
-        handled = await invoke(this.dcs.get(parsed.key), parsed.data, parsed.params);
+        const result = invoke(this.dcs.get(parsed.key), parsed.data, parsed.params);
+        handled = typeof result === 'boolean' ? result : await result;
       } else if (parsed.kind === 'osc') {
-        handled = await invoke(this.osc.get(parsed.ident), parsed.data);
+        const result = invoke(this.osc.get(parsed.ident), parsed.data);
+        handled = typeof result === 'boolean' ? result : await result;
       } else {
-        handled = await invoke(this.esc.get(parsed.key));
+        const result = invoke(this.esc.get(parsed.key));
+        handled = typeof result === 'boolean' ? result : await result;
       }
-      if (!handled) output += input.slice(start, parsed.end);
+      if (handled) changed = true;
+      else output.push(input.slice(start, parsed.end));
       offset = parsed.end;
     }
-    return output;
+    return changed ? output.join('') : data;
   }
 }
 
@@ -191,13 +210,36 @@ function register<K, H>(map: Map<K, H[]>, key: K, handler: H): IDisposable {
   };
 }
 
-async function invoke<Args extends readonly unknown[]>(
+function invoke<Args extends readonly unknown[]>(
   handlers: readonly ((...args: Args) => boolean | Promise<boolean>)[] | undefined,
   ...args: Args
-): Promise<boolean> {
+): boolean | Promise<boolean> {
   if (!handlers) return false;
   for (let index = handlers.length - 1; index >= 0; index -= 1) {
-    if (await handlers[index]?.(...args)) return true;
+    const result = handlers[index]?.(...args) ?? false;
+    if (typeof result === 'boolean') {
+      if (result) return true;
+      continue;
+    }
+    return continueInvocation(result, handlers, index - 1, args);
   }
+  return false;
+}
+
+async function continueInvocation<Args extends readonly unknown[]>(
+  result: Promise<boolean>,
+  handlers: readonly ((...args: Args) => boolean | Promise<boolean>)[],
+  index: number,
+  args: Args
+): Promise<boolean> {
+  if (await result) return true;
+  for (let current = index; current >= 0; current -= 1) {
+    if (await handlers[current]?.(...args)) return true;
+  }
+  return false;
+}
+
+function containsEscape(data: Uint8Array): boolean {
+  for (const value of data) if (value === 0x1b) return true;
   return false;
 }

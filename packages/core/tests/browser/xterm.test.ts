@@ -4,6 +4,25 @@ import { createTerminal, type GespenstTerminal, type TerminalBufferSnapshot } fr
 
 const nativeTerminals: GespenstTerminal[] = [];
 const compatibleTerminals: Terminal[] = [];
+const compatibilityBridgeKey = Symbol.for('@gespenst/core/xterm-compatibility');
+
+interface CompatibilityBridge {
+  writeAsync(data: Uint8Array, owned: boolean): Promise<unknown>;
+}
+
+function compatibilityBridge(native: GespenstTerminal): CompatibilityBridge {
+  const bridge = (native as unknown as Record<symbol, CompatibilityBridge | undefined>)[
+    compatibilityBridgeKey
+  ];
+  if (!bridge) throw new Error('Core compatibility bridge is unavailable');
+  return bridge;
+}
+
+function disableCompatibilityBridge(native: GespenstTerminal): void {
+  delete (native as unknown as Record<symbol, CompatibilityBridge | undefined>)[
+    compatibilityBridgeKey
+  ];
+}
 
 afterEach(() => {
   for (const terminal of compatibleTerminals.splice(0)) terminal.dispose();
@@ -78,7 +97,7 @@ describe('@gespenst/xterm', () => {
     terminal.open(host());
     await terminal.ready;
     const native = await terminal.native;
-    const writeAsync = vi.spyOn(native, 'writeAsync');
+    const writeAsync = vi.spyOn(compatibilityBridge(native), 'writeAsync');
     const callbacks: number[] = [];
 
     terminal.write('one', () => callbacks.push(1));
@@ -217,6 +236,7 @@ describe('@gespenst/xterm', () => {
     terminal.open(host());
     await terminal.ready;
     const native = await terminal.native;
+    disableCompatibilityBridge(native);
     let snapshot = bufferSnapshot(['a', 'b', 'c'], 1);
     vi.spyOn(native, 'readBuffer').mockImplementation(async () => snapshot);
     await new Promise<void>((resolve) => terminal.write('seed', resolve));
@@ -248,6 +268,7 @@ describe('@gespenst/xterm', () => {
     terminal.open(host());
     await terminal.ready;
     const native = await terminal.native;
+    disableCompatibilityBridge(native);
     const initial = bufferSnapshot(['a', 'b', 'c', 'd', 'e', 'f'], 1);
     const partial = bufferSnapshot(['g', 'h'], 2, 4, 6);
     const complete = bufferSnapshot(['c', 'd', 'e', 'f', 'g', 'h'], 2);

@@ -52,4 +52,21 @@ describe('xterm parser compatibility', () => {
     const oversized = `\x1b]${'x'.repeat(10 * 1024 * 1024)}`;
     await expect(parser.process(oversized)).rejects.toThrow('exceeded 10 MiB');
   });
+
+  it('preserves byte identity when registered handlers cannot match the chunk', async () => {
+    const parser = new ParserApi();
+    parser.registerOscHandler(8, () => true);
+    const bytes = new TextEncoder().encode('plain UTF-8: 👻');
+
+    expect(await parser.process(bytes)).toBe(bytes);
+  });
+
+  it('keeps streaming UTF-8 state after a handled byte sequence', async () => {
+    const parser = new ParserApi();
+    parser.registerCsiHandler({ final: 'm' }, () => true);
+    const bytes = new TextEncoder().encode('\x1b[31m👻');
+
+    expect(await parser.process(bytes.subarray(0, bytes.length - 2))).toBe('');
+    expect(await parser.process(bytes.subarray(bytes.length - 2))).toBe('👻');
+  });
 });

@@ -19,6 +19,10 @@ export class TypedEventEmitter<Events extends object> {
     for (const listener of [...listeners]) listener(value as never);
   }
 
+  hasListeners<Key extends keyof Events>(type: Key): boolean {
+    return (this.listeners.get(type)?.size ?? 0) > 0;
+  }
+
   clear(): void {
     this.listeners.clear();
   }

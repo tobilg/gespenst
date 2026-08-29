@@ -1,6 +1,7 @@
 import type { AbiBitField } from './abi.js';
 import type { Allocation, GhosttyBindings } from './bindings.js';
 import type {
+  CellColor,
   CellStyle,
   CellWidth,
   CursorStyle,
@@ -317,10 +318,10 @@ export class RenderReader {
       view.getUint32(this.bindings.abi.field('GhosttyCellsView', 'len').offset, true)
     );
     const renderCells: RenderCell[] = [];
+    const memory = new DataView(this.bindings.exports.memory.buffer);
     let text = '';
     for (let x = 0; x < cellCount; x += 1) {
       const pointer = cellsPointer + x * 8;
-      const memory = new DataView(this.bindings.exports.memory.buffer);
       const low = memory.getUint32(pointer, true);
       const high = memory.getUint32(pointer + 4, true);
       const tag = packedBits(low, high, this.cellBits.contentTag);
@@ -350,6 +351,13 @@ export class RenderReader {
         style,
         foreground,
         background,
+        ...(styleId === 0
+          ? {}
+          : {
+              foregroundSource: this.readStyleColorSource('fg_color'),
+              backgroundSource: this.readStyleColorSource('bg_color'),
+              underlineSource: this.readStyleColorSource('underline_color'),
+            }),
         hyperlink,
         semanticContent: semantic,
       };
@@ -441,6 +449,29 @@ export class RenderReader {
     if (result === this.bindings.abi.value('GhosttyResult', 'INVALID_VALUE')) return null;
     this.bindings.check(result, `read ${name}`);
     return this.bindings.readColor(this.colorValue.pointer);
+  }
+
+  private readStyleColorSource(fieldName: 'fg_color' | 'bg_color' | 'underline_color'): CellColor {
+    const abi = this.bindings.abi;
+    const base = abi.field('GhosttyStyle', fieldName).offset;
+    const tag = this.styleValue.view.getInt32(
+      base + abi.field('GhosttyStyleColor', 'tag').offset,
+      true
+    );
+    const value = base + abi.field('GhosttyStyleColor', 'value').offset;
+    if (tag === abi.value('GhosttyStyleColorTag', 'PALETTE'))
+      return { mode: 'palette', value: this.styleValue.view.getUint8(value) };
+    if (tag === abi.value('GhosttyStyleColorTag', 'RGB')) {
+      return {
+        mode: 'rgb',
+        value: {
+          r: this.styleValue.view.getUint8(value),
+          g: this.styleValue.view.getUint8(value + 1),
+          b: this.styleValue.view.getUint8(value + 2),
+        },
+      };
+    }
+    return { mode: 'default' };
   }
 
   private readGrapheme(x: number): string {

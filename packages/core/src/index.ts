@@ -43,7 +43,9 @@ export type {
 export {
   ANSI_COLOR_NAMES,
   cloneTerminalTheme,
+  DEFAULT_CALLBACKS_URL,
   DEFAULT_THEME,
+  DEFAULT_WASM_URL,
   GHOSTTY_BUILD,
   KeyModifiers,
   mergeTerminalTheme,

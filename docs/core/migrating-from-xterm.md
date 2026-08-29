@@ -25,6 +25,31 @@ the Ghostty-backed native terminal. Synchronous calls made before initialization
 `ready` for an explicit initialization boundary and `native` when a gradual migration needs the
 underlying `BrowserTerminal`.
 
+### Preload and tune the native runtime
+
+Gespenst-specific constructor controls are isolated under `gespenst`, leaving xterm's current and
+future options untouched:
+
+```ts
+import { preloadXtermRuntime, Terminal } from '@gespenst/xterm';
+
+const runtime = await preloadXtermRuntime();
+const terminal = new Terminal({
+  scrollback: 10_000,
+  gespenst: {
+    ...runtime,
+    worker: 'shared',
+    renderer: 'auto',
+  },
+});
+```
+
+Preloading moves compilation of the VT and callback WASM modules out of terminal startup. Dedicated
+workers remain the default for isolation. Shared workers reduce runtime duplication when a page
+owns several terminals; `worker: false` is mainly useful for controlled integration tests and
+benchmarks. Keep PTY output as `Uint8Array`: write callbacks resolve after parsing and compatibility
+buffer synchronization, while `onRender` is the painted-frame boundary.
+
 ## Native API mapping
 
 | xterm.js concept | Native equivalent |

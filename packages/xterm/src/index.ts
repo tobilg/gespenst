@@ -1,11 +1,16 @@
 import {
   ANSI_COLOR_NAMES,
   createTerminal,
+  DEFAULT_CALLBACKS_URL,
+  DEFAULT_WASM_URL,
   type GespenstTerminal,
   type TerminalOptions as NativeTerminalOptions,
   parseTerminalColor,
+  preloadGhostty,
   type RenderCell,
+  type RendererPreference,
   resolveTerminalTheme,
+  type TerminalBufferState,
   type TerminalCursorAttributes,
   type TerminalTheme,
   terminalColorToCss,
@@ -29,15 +34,126 @@ import type {
   IUnicodeHandling,
   IUnicodeVersionProvider,
 } from '@xterm/xterm';
-import { BufferCell, BufferNamespace } from './buffer';
+import {
+  BufferCell,
+  BufferNamespace,
+  type PackedBufferRow,
+  type PackedBufferSnapshot,
+} from './buffer';
 import { EventEmitter } from './events';
 import { ParserApi } from './parser';
 import './style.css';
 
 export type * from '@xterm/xterm';
 
+/** Gespenst runtime and renderer controls layered on top of xterm.js constructor options. */
+export interface GespenstXtermRuntimeOptions {
+  /** Core execution policy. Dedicated workers remain the default when supported. */
+  readonly worker?: false | 'dedicated' | 'shared';
+  /** Preferred native renderer and its built-in fallback ladder. */
+  readonly renderer?: RendererPreference;
+  /** Precompiled module, URL, or bytes for the Ghostty VT runtime. */
+  readonly wasm?: NativeTerminalOptions['wasm'];
+  /** Precompiled module, URL, or bytes for the Ghostty callback bridge. */
+  readonly callbacksWasm?: NativeTerminalOptions['callbacksWasm'];
+}
+
+/** Full constructor shape accepted by {@link Terminal}. */
+export interface GespenstTerminalOptions extends ITerminalOptions, ITerminalInitOnlyOptions {
+  /** Optional native tuning that intentionally lives outside the upstream xterm option surface. */
+  readonly gespenst?: GespenstXtermRuntimeOptions;
+}
+
+/** Compiled runtime modules reusable by any number of xterm-compatible terminals. */
+export interface PreloadedXtermRuntime {
+  /** Compiled Ghostty VT module accepted by `gespenst.wasm`. */
+  readonly wasm: WebAssembly.Module;
+  /** Compiled callback bridge module accepted by `gespenst.callbacksWasm`. */
+  readonly callbacksWasm: WebAssembly.Module;
+}
+
+/** Compiles and caches both WASM artifacts before a terminal is constructed. */
+export async function preloadXtermRuntime(
+  options: Pick<GespenstXtermRuntimeOptions, 'wasm' | 'callbacksWasm'> = {}
+): Promise<PreloadedXtermRuntime> {
+  const [wasm, callbacksWasm] = await Promise.all([
+    preloadGhostty(options.wasm ?? DEFAULT_WASM_URL),
+    preloadGhostty(options.callbacksWasm ?? DEFAULT_CALLBACKS_URL),
+  ]);
+  return { wasm, callbacksWasm };
+}
+
 /** xterm.js API version targeted by this compatibility package. */
 export const XTERM_COMPAT_VERSION = '6.0.0' as const;
+
+const CORE_XTERM_BRIDGE = Symbol.for('@gespenst/core/xterm-compatibility');
+const XTERM_BENCHMARK_HOOKS = Symbol.for('@gespenst/xterm/benchmark');
+const WRITE_QUEUE_WATERMARK = 50 * 1024 * 1024;
+const WRITE_BATCH_BYTES = 1024 * 1024;
+const WRITE_SLICE_MS = 8;
+
+interface CoreCompatibilityRow extends PackedBufferRow {}
+
+interface CoreCompatibilityUpdate {
+  readonly state: TerminalBufferState;
+  readonly dirty: 'clean' | 'partial' | 'full';
+  readonly trimmed: number;
+  readonly appendStart: number;
+  readonly reset: boolean;
+  readonly rows: readonly CoreCompatibilityRow[];
+}
+
+interface CoreCompatibilityBatch {
+  readonly updates: readonly CoreCompatibilityUpdate[];
+}
+
+interface CoreCompatibilityBridge {
+  onInput?(listener: (data: string | Uint8Array, source: string) => void): {
+    readonly dispose: () => void;
+  };
+  writeAsync(
+    data: Uint8Array,
+    owned: boolean,
+    boundaries: Uint32Array
+  ): Promise<CoreCompatibilityBatch>;
+  writeMeasured?(
+    data: Uint8Array,
+    owned: boolean,
+    boundaries: Uint32Array
+  ): Promise<{
+    readonly batch: CoreCompatibilityBatch;
+    readonly timing: CoreBenchmarkTiming;
+  }>;
+}
+
+interface CoreBenchmarkTiming {
+  readonly parseMs: number;
+  readonly renderWaitMs: number;
+  readonly renderMs: number;
+  readonly compatibilityMs: number;
+  readonly backendMs: number;
+}
+
+interface XtermBenchmarkTiming {
+  readonly queueMs: number;
+  readonly adapterMs: number;
+  readonly bufferSyncMs: number;
+  readonly callbackMs: number;
+  readonly totalMs: number;
+  readonly core?: CoreBenchmarkTiming;
+}
+
+interface XtermBenchmarkMeasurement {
+  readonly queuedAt: number;
+  resolve(value: XtermBenchmarkTiming): void;
+  reject(error: Error): void;
+}
+
+function coreCompatibilityBridge(native: GespenstTerminal): CoreCompatibilityBridge | undefined {
+  return (native as unknown as Record<symbol, CoreCompatibilityBridge | undefined>)[
+    CORE_XTERM_BRIDGE
+  ];
+}
 
 /** Error thrown when an xterm.js extension point cannot be implemented over Ghostty. */
 export class XtermCompatibilityError extends Error {
@@ -347,6 +463,7 @@ export class Terminal {
   private rowsValue: number;
   private colsValue: number;
   private optionValues: ITerminalOptions;
+  private readonly gespenstOptions: GespenstXtermRuntimeOptions;
   private readonly optionsProxy: ITerminalOptions;
   private modeValues: MutableModes = { ...INITIAL_MODES };
   private selectionValue = '';
@@ -359,18 +476,24 @@ export class Terminal {
         readonly kind: 'write';
         readonly data: string | Uint8Array;
         readonly callback?: () => void;
+        readonly measurement?: XtermBenchmarkMeasurement;
       }
     | { readonly kind: 'clear' }
   > = [];
+  private pendingWriteHead = 0;
   private writeFlushScheduled = false;
+  private pendingWriteBytes = 0;
+  private didUserInput = false;
+  private compatibilityWritesPending = 0;
+  private mountingNative = false;
   private writeParsedQueued = false;
+  private pendingRenderRange: XtermRenderEvent | null = null;
   private lastCursor = '0:0';
   private lastKeyboardEvent: KeyboardEvent | undefined;
   private customKeyHandler: ((event: KeyboardEvent) => boolean) | undefined;
   private customWheelHandler: ((event: WheelEvent) => boolean) | undefined;
   private readonly decoder = new TextDecoder();
-  private readonly modeDecoder = new TextDecoder();
-  private modePending = '';
+  private readonly encoder = new TextEncoder();
   private convertEolPreviousWasCarriageReturn = false;
   private viewportSyncPromise: Promise<void> | null = null;
   private readonly bufferValue: BufferNamespace;
@@ -440,10 +563,11 @@ export class Terminal {
   readonly onTitleChange = this.titleEvent.event;
 
   /** Creates a terminal using xterm.js initialization and runtime options. */
-  constructor(options: ITerminalOptions & ITerminalInitOnlyOptions = {}) {
+  constructor(options: GespenstTerminalOptions = {}) {
     this.colsValue = normalizeDimension(options.cols, 80, 2);
     this.rowsValue = normalizeDimension(options.rows, 24, 1);
-    const { cols: _cols, rows: _rows, ...runtimeOptions } = options;
+    const { cols: _cols, rows: _rows, gespenst = {}, ...runtimeOptions } = options;
+    this.gespenstOptions = gespenst;
     this.optionValues = { ...DEFAULT_OPTIONS };
     this.optionValues = applyValidatedOptions(this.optionValues, runtimeOptions, true);
     assertSupportedOptions(this.optionValues);
@@ -451,7 +575,11 @@ export class Terminal {
       () => this.optionValues,
       (property, value) => this.applyOptions({ [property]: value } as ITerminalOptions)
     );
-    this.bufferValue = new BufferNamespace(this.colsValue, this.rowsValue);
+    this.bufferValue = new BufferNamespace(
+      this.colsValue,
+      this.rowsValue,
+      this.optionValues.scrollback ?? 1000
+    );
     this.buffer = this.bufferValue;
     this.parser = this.parserValue;
     this.unicode = new UnicodeHandling(() => this.requireProposed('unicode'));
@@ -480,6 +608,14 @@ export class Terminal {
       this.nativeValue = native;
       this.bindNative(native);
       return undefined;
+    });
+    Object.defineProperty(this, XTERM_BENCHMARK_HOOKS, {
+      configurable: false,
+      enumerable: false,
+      value: {
+        write: (data: string | Uint8Array) => this.writeMeasured(data),
+      },
+      writable: false,
     });
   }
 
@@ -537,6 +673,7 @@ export class Terminal {
   /** Sends user input to the PTY-facing native input stream. */
   input(data: string, wasUserInput = true): void {
     if (this.optionValues.disableStdin) return;
+    if (wasUserInput) this.didUserInput = true;
     if (wasUserInput) this.clearSelection();
     if (wasUserInput && this.optionValues.scrollOnUserInput) this.scrollToBottom();
     this.dataEvent.fire(data);
@@ -583,7 +720,17 @@ export class Terminal {
     void this.native
       .then(async (native) => {
         if (this.disposed) return;
-        await native.open(screen);
+        const cols = this.colsValue;
+        const rows = this.rowsValue;
+        this.mountingNative = true;
+        try {
+          await native.open(screen);
+          // Core `open()` fits its host by design, while xterm.js preserves the configured grid
+          // until the caller or FitAddon explicitly resizes it.
+          native.resize(cols, rows);
+        } finally {
+          this.mountingNative = false;
+        }
         this.textareaValue = native.element.querySelector('textarea') ?? undefined;
         this.textareaValue?.classList.add('xterm-helper-textarea');
         if (this.textareaValue)
@@ -787,20 +934,54 @@ export class Terminal {
   /** Queues text or bytes for Ghostty parsing and invokes `callback` after synchronization. */
   write(data: string | Uint8Array, callback?: () => void): void {
     this.assertActive();
+    const size = typeof data === 'string' ? data.length : data.byteLength;
+    if (this.pendingWriteBytes + size > WRITE_QUEUE_WATERMARK) {
+      throw new Error('write data discarded, use flow control to avoid losing data');
+    }
     this.startNative();
     this.pendingWrites.push({ kind: 'write', data, ...(callback ? { callback } : {}) });
+    this.pendingWriteBytes += size;
     this.scheduleWriteFlush();
+  }
+
+  private writeMeasured(data: string | Uint8Array): Promise<XtermBenchmarkTiming> {
+    this.assertActive();
+    const size = typeof data === 'string' ? data.length : data.byteLength;
+    if (this.pendingWriteBytes + size > WRITE_QUEUE_WATERMARK) {
+      return Promise.reject(
+        new Error('write data discarded, use flow control to avoid losing data')
+      );
+    }
+    this.startNative();
+    const measured = new Promise<XtermBenchmarkTiming>((resolve, reject) => {
+      this.pendingWrites.push({
+        kind: 'write',
+        data,
+        measurement: { queuedAt: performance.now(), resolve, reject },
+      });
+    });
+    this.pendingWriteBytes += size;
+    this.scheduleWriteFlush();
+    return measured;
   }
 
   private scheduleWriteFlush(): void {
     if (this.writeFlushScheduled) return;
     this.writeFlushScheduled = true;
-    queueMicrotask(() => {
+    const flush = () => {
       this.writeFlushScheduled = false;
       this.writeQueue = this.writeQueue
         .then(() => this.flushWrites())
-        .catch((error: unknown) => this.logError(error));
-    });
+        .catch((error: unknown) => this.logError(error))
+        .finally(() => {
+          if (!this.disposed && this.pendingWriteHead < this.pendingWrites.length)
+            this.scheduleWriteFlush();
+        });
+    };
+    if (this.didUserInput) {
+      this.didUserInput = false;
+      queueMicrotask(flush);
+    } else setTimeout(flush, 0);
   }
 
   /** Writes text or bytes followed by carriage return and line feed. */
@@ -908,27 +1089,85 @@ export class Terminal {
       minimumContrastRatio: this.optionValues.minimumContrastRatio ?? 1,
       defaultCursorStyle: this.optionValues.cursorStyle ?? 'block',
       defaultCursorBlink: this.optionValues.cursorBlink ?? false,
+      ...(this.gespenstOptions.worker === undefined ? {} : { worker: this.gespenstOptions.worker }),
+      ...(this.gespenstOptions.renderer === undefined
+        ? {}
+        : { renderer: this.gespenstOptions.renderer }),
+      ...(this.gespenstOptions.wasm === undefined ? {} : { wasm: this.gespenstOptions.wasm }),
+      ...(this.gespenstOptions.callbacksWasm === undefined
+        ? {}
+        : { callbacksWasm: this.gespenstOptions.callbacksWasm }),
       ...(theme ? { theme } : {}),
     };
   }
 
   private async flushWrites(): Promise<void> {
-    const entries = this.pendingWrites.splice(0);
+    const entries: typeof this.pendingWrites = [];
+    let batchBytes = 0;
+    while (this.pendingWriteHead < this.pendingWrites.length) {
+      const entry = this.pendingWrites[this.pendingWriteHead];
+      if (!entry) break;
+      const size =
+        entry.kind === 'write'
+          ? typeof entry.data === 'string'
+            ? entry.data.length
+            : entry.data.byteLength
+          : 0;
+      if (entries.length > 0 && batchBytes + size > WRITE_BATCH_BYTES) break;
+      this.pendingWriteHead += 1;
+      entries.push(entry);
+      batchBytes += size;
+      this.pendingWriteBytes = Math.max(0, this.pendingWriteBytes - size);
+      if (batchBytes >= WRITE_BATCH_BYTES) break;
+    }
+    if (
+      this.pendingWriteHead === this.pendingWrites.length ||
+      (this.pendingWriteHead > 1024 && this.pendingWriteHead * 2 > this.pendingWrites.length)
+    ) {
+      this.pendingWrites.splice(0, this.pendingWriteHead);
+      this.pendingWriteHead = 0;
+    }
     if (entries.length === 0 || this.disposed) return;
     const native = await this.native;
     if (this.disposed) return;
-    const chunks: Uint8Array[] = [];
+    const bridge = coreCompatibilityBridge(native);
+    const chunks: Array<{ readonly data: Uint8Array; readonly owned: boolean }> = [];
+    let sliceStarted = performance.now();
     const flushChunks = async (): Promise<void> => {
       if (chunks.length === 0) return;
-      const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
-      const output = new Uint8Array(length);
-      let offset = 0;
-      for (const chunk of chunks.splice(0)) {
-        output.set(chunk, offset);
-        offset += chunk.byteLength;
+      let output: Uint8Array;
+      let owned: boolean;
+      if (chunks.length === 1) {
+        const chunk = chunks.shift();
+        if (!chunk) return;
+        output = chunk.data;
+        owned = chunk.owned;
+      } else {
+        const length = chunks.reduce((total, chunk) => total + chunk.data.byteLength, 0);
+        output = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks.splice(0)) {
+          output.set(chunk.data, offset);
+          offset += chunk.data.byteLength;
+        }
+        owned = true;
       }
-      await native.writeAsync(output);
-      await this.syncViewport();
+      if (bridge) {
+        this.compatibilityWritesPending += 1;
+        try {
+          const batch = await bridge.writeAsync(
+            output,
+            owned,
+            this.compatibilityBoundaries(output)
+          );
+          await this.applyCompatibilityBatch(batch);
+        } finally {
+          this.compatibilityWritesPending -= 1;
+        }
+      } else {
+        await native.writeAsync(output);
+        await this.syncViewport();
+      }
     };
     for (const entry of entries) {
       if (entry.kind === 'clear') {
@@ -943,14 +1182,117 @@ export class Terminal {
         await this.syncViewport();
         continue;
       }
+      if (entry.measurement) {
+        await flushChunks();
+        const measurement = entry.measurement;
+        const adapterStartedAt = performance.now();
+        try {
+          const normalized = this.normalizeWrite(entry.data);
+          const filtered = this.parserValue.active
+            ? await this.parserValue.process(normalized)
+            : normalized;
+          this.emitLineFeeds(filtered);
+          const bytes = typeof filtered === 'string' ? this.encoder.encode(filtered) : filtered;
+          const adapterMs = performance.now() - adapterStartedAt;
+          let core: CoreBenchmarkTiming | undefined;
+          let bufferSyncMs = 0;
+          if (bytes.byteLength > 0 && bridge?.writeMeasured) {
+            this.compatibilityWritesPending += 1;
+            try {
+              const syncStartedAt = performance.now();
+              const result = await bridge.writeMeasured(
+                bytes,
+                typeof filtered === 'string' || filtered !== entry.data,
+                this.compatibilityBoundaries(bytes)
+              );
+              await this.applyCompatibilityBatch(result.batch);
+              core = result.timing;
+              bufferSyncMs = performance.now() - syncStartedAt;
+            } finally {
+              this.compatibilityWritesPending -= 1;
+            }
+          } else if (bytes.byteLength > 0) {
+            if (bridge) {
+              const syncStartedAt = performance.now();
+              const batch = await bridge.writeAsync(
+                bytes,
+                typeof filtered === 'string' || filtered !== entry.data,
+                this.compatibilityBoundaries(bytes)
+              );
+              await this.applyCompatibilityBatch(batch);
+              bufferSyncMs = performance.now() - syncStartedAt;
+            } else {
+              await native.writeAsync(bytes);
+              const syncStartedAt = performance.now();
+              await this.syncViewport();
+              bufferSyncMs = performance.now() - syncStartedAt;
+            }
+          }
+          const callbackStartedAt = performance.now();
+          const result: {
+            queueMs: number;
+            adapterMs: number;
+            bufferSyncMs: number;
+            callbackMs: number;
+            totalMs: number;
+            core?: CoreBenchmarkTiming;
+          } = {
+            queueMs: adapterStartedAt - measurement.queuedAt,
+            adapterMs,
+            bufferSyncMs,
+            callbackMs: 0,
+            totalMs: callbackStartedAt - measurement.queuedAt,
+            ...(core ? { core } : {}),
+          };
+          measurement.resolve(result);
+          result.callbackMs = performance.now() - callbackStartedAt;
+        } catch (error) {
+          measurement.reject(error instanceof Error ? error : new Error(String(error)));
+        }
+        continue;
+      }
       const normalized = this.normalizeWrite(entry.data);
-      const filtered = await this.parserValue.process(normalized);
-      this.updateSidecar(filtered);
-      const bytes = typeof filtered === 'string' ? new TextEncoder().encode(filtered) : filtered;
-      if (bytes.byteLength > 0) chunks.push(bytes);
+      const filtered = this.parserValue.active
+        ? await this.parserValue.process(normalized)
+        : normalized;
+      this.emitLineFeeds(filtered);
+      const bytes = typeof filtered === 'string' ? this.encoder.encode(filtered) : filtered;
+      if (bytes.byteLength > 0)
+        chunks.push({
+          data: bytes,
+          owned: typeof filtered === 'string' || filtered !== entry.data,
+        });
+      if (
+        (this.parserValue.active || this.lineFeedEvent.hasListeners) &&
+        performance.now() - sliceStarted >= WRITE_SLICE_MS
+      ) {
+        await flushChunks();
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        sliceStarted = performance.now();
+      }
     }
     await flushChunks();
     for (const entry of entries) if (entry.kind === 'write') entry.callback?.();
+  }
+
+  private compatibilityBoundaries(data: Uint8Array): Uint32Array {
+    if ((this.optionValues.scrollback ?? 1000) === 0 || this.rowsValue <= 1) {
+      return new Uint32Array([data.byteLength]);
+    }
+    const maximumLineFeeds = Math.max(1, this.rowsValue - 1);
+    const maximumBytes = Math.max(1, this.colsValue * maximumLineFeeds);
+    const boundaries: number[] = [];
+    let start = 0;
+    let lineFeeds = 0;
+    for (let index = 0; index < data.byteLength; index += 1) {
+      if (data[index] === 0x0a) lineFeeds += 1;
+      if (lineFeeds < maximumLineFeeds && index + 1 - start < maximumBytes) continue;
+      boundaries.push(index + 1);
+      start = index + 1;
+      lineFeeds = 0;
+    }
+    if (start < data.byteLength || boundaries.length === 0) boundaries.push(data.byteLength);
+    return Uint32Array.from(boundaries);
   }
 
   private startNative(): void {
@@ -960,39 +1302,26 @@ export class Terminal {
   }
 
   private bindNative(native: GespenstTerminal): void {
+    const bridge = coreCompatibilityBridge(native);
+    const input = bridge?.onInput
+      ? bridge.onInput((data, source) => this.handleNativeInput(data, source))
+      : native.on('input', ({ data, source }) => this.handleNativeInput(data, source));
     this.disposables.push(
-      native.on('input', ({ data, source }) => {
-        if (
-          source === 'mouse' &&
-          data.length >= 3 &&
-          data[0] === 0x1b &&
-          data[1] === 0x5b &&
-          data[2] === 0x4d
-        ) {
-          this.binaryEvent.fire(String.fromCharCode(...data));
-          this.lastKeyboardEvent = undefined;
-          return;
-        }
-        const value = this.decoder.decode(data, { stream: true });
-        if (!value) return;
-        this.dataEvent.fire(value);
-        if (
-          source === 'key' &&
-          this.lastKeyboardEvent &&
-          this.lastKeyboardEvent.type === 'keydown'
-        ) {
-          this.keyEvent.fire({ key: value, domEvent: this.lastKeyboardEvent });
-          this.lastKeyboardEvent = undefined;
-        } else if (source !== 'key') this.lastKeyboardEvent = undefined;
-      }),
+      input,
       native.on('bell', () => this.bellEvent.fire(undefined)),
       native.on('title', (title) => this.titleEvent.fire(title)),
       native.on('scroll', (position) => {
         this.scrollEvent.fire(position);
-        this.queueViewportSync();
+        if (this.compatibilityWritesPending === 0) this.queueViewportSync();
       }),
       native.on('selectionChange', () => this.refreshSelection(true)),
+      native.on('viewportChange', () => {
+        const range = this.pendingRenderRange;
+        this.pendingRenderRange = null;
+        if (range && this.renderEvent.hasListeners) this.renderEvent.fire(range);
+      }),
       native.on('resize', ({ cols, rows }) => {
+        if (this.mountingNative) return;
         this.colsValue = cols;
         this.rowsValue = rows;
         this.resizeEvent.fire({ cols, rows });
@@ -1000,6 +1329,29 @@ export class Terminal {
       }),
       native.on('font', () => this.queueViewportSync())
     );
+  }
+
+  private handleNativeInput(data: string | Uint8Array, source: string): void {
+    if (source === 'key' || source === 'text' || source === 'paste') this.didUserInput = true;
+    if (
+      source === 'mouse' &&
+      data instanceof Uint8Array &&
+      data.length >= 3 &&
+      data[0] === 0x1b &&
+      data[1] === 0x5b &&
+      data[2] === 0x4d
+    ) {
+      this.binaryEvent.fire(String.fromCharCode(...data));
+      this.lastKeyboardEvent = undefined;
+      return;
+    }
+    const value = typeof data === 'string' ? data : this.decoder.decode(data, { stream: true });
+    if (!value) return;
+    this.dataEvent.fire(value);
+    if (source === 'key' && this.lastKeyboardEvent && this.lastKeyboardEvent.type === 'keydown') {
+      this.keyEvent.fire({ key: value, domEvent: this.lastKeyboardEvent });
+      this.lastKeyboardEvent = undefined;
+    } else if (source !== 'key') this.lastKeyboardEvent = undefined;
   }
 
   private bindDom(element: HTMLElement): void {
@@ -1072,7 +1424,7 @@ export class Terminal {
     if (!native) return;
     let snapshot = await native.readBuffer();
     if (this.disposed) return;
-    this.clearActiveLink();
+    if (this.activeLink || this.linkDecorations.length > 0) this.clearActiveLink();
     let update = this.bufferValue.update(snapshot, this.colsValue);
     this.reconcileMarkers(update.trimmed, update.identityReset);
     if (update.missing) {
@@ -1081,34 +1433,99 @@ export class Terminal {
       update = this.bufferValue.update(snapshot, this.colsValue);
       this.reconcileMarkers(update.trimmed, update.identityReset);
     }
-    if (snapshot.state.modes) this.modeValues = { ...snapshot.state.modes };
-    if (snapshot.state.cursorAttributes) {
-      this.cursorAttributes = snapshot.state.cursorAttributes;
-      this._core._inputHandler._curAttrData.load(
-        cursorAttributeCell(snapshot.state.cursorAttributes)
+    this.finalizeViewportUpdate(snapshot.state, { start: 0, end: Math.max(0, this.rowsValue - 1) });
+  }
+
+  private async applyCompatibilityBatch(batch: CoreCompatibilityBatch): Promise<void> {
+    if (this.disposed) return;
+    const native = this.nativeValue;
+    if (!native) return;
+    if (this.activeLink || this.linkDecorations.length > 0) this.clearActiveLink();
+    let finalState: TerminalBufferState | null = null;
+    let range: XtermRenderEvent | null = null;
+    let normalTrimmed = 0;
+    let normalReset = false;
+    for (const update of batch.updates) {
+      let bufferUpdate = this.bufferValue.update(
+        {
+          state: update.state,
+          rows: update.rows,
+          trimmed: update.trimmed,
+          appendStart: update.appendStart,
+          reset: update.reset,
+        } satisfies PackedBufferSnapshot,
+        this.colsValue
       );
+      let state = update.state;
+      if (state.screen === 'normal') {
+        normalTrimmed += bufferUpdate.trimmed;
+        normalReset ||= bufferUpdate.identityReset;
+      }
+      if (bufferUpdate.missing) {
+        const snapshot = await native.readBuffer(bufferUpdate.missing);
+        if (this.disposed) return;
+        bufferUpdate = this.bufferValue.update(snapshot, this.colsValue);
+        if (snapshot.state.screen === 'normal') {
+          normalTrimmed += bufferUpdate.trimmed;
+          normalReset ||= bufferUpdate.identityReset;
+        }
+        state = snapshot.state;
+      }
+      finalState = state;
+      const updateRange = compatibilityRenderRange(update, state, this.rowsValue);
+      if (updateRange) {
+        range = range
+          ? {
+              start: Math.min(range.start, updateRange.start),
+              end: Math.max(range.end, updateRange.end),
+            }
+          : updateRange;
+      }
+    }
+    this.reconcileMarkers(normalTrimmed, normalReset);
+    if (finalState) this.finalizeViewportUpdate(finalState, range);
+  }
+
+  private finalizeViewportUpdate(
+    state: TerminalBufferState,
+    renderRange: XtermRenderEvent | null
+  ): void {
+    if (state.modes) this.modeValues = { ...state.modes };
+    if (state.cursorAttributes) {
+      this.cursorAttributes = state.cursorAttributes;
+      this._core._inputHandler._curAttrData.load(cursorAttributeCell(state.cursorAttributes));
     }
     const metrics = this.cssCellMetrics();
-    if (this.scrollAreaValue)
-      this.scrollAreaValue.style.height = `${snapshot.state.totalRows * metrics.cellHeightPx}px`;
+    if (this.scrollAreaValue) {
+      const height = `${state.totalRows * metrics.cellHeightPx}px`;
+      if (this.scrollAreaValue.style.height !== height) this.scrollAreaValue.style.height = height;
+    }
     if (this.viewportValue) {
       this.syncingScrollbar = true;
-      this.viewportValue.scrollTop = snapshot.state.viewportY * metrics.cellHeightPx;
+      const scrollTop = state.viewportY * metrics.cellHeightPx;
+      if (this.viewportValue.scrollTop !== scrollTop) this.viewportValue.scrollTop = scrollTop;
       queueMicrotask(() => {
         this.syncingScrollbar = false;
       });
     }
-    this.refreshDecorations();
-    const cursor = `${snapshot.state.cursorX}:${snapshot.state.cursorY}`;
+    if (this.decorations.size > 0) this.refreshDecorations();
+    const cursor = `${state.cursorX}:${state.cursorY}`;
     if (cursor !== this.lastCursor) {
       this.lastCursor = cursor;
       this.cursorMoveEvent.fire(undefined);
     }
-    this.renderEvent.fire({ start: 0, end: Math.max(0, this.rowsValue - 1) });
-    this.refreshSelection();
-    if (!this.writeParsedQueued) {
+    if (renderRange) {
+      this.pendingRenderRange = this.pendingRenderRange
+        ? {
+            start: Math.min(this.pendingRenderRange.start, renderRange.start),
+            end: Math.max(this.pendingRenderRange.end, renderRange.end),
+          }
+        : renderRange;
+    }
+    if (this.selectionValue) this.refreshSelection();
+    if (this.writeParsedEvent.hasListeners && !this.writeParsedQueued) {
       this.writeParsedQueued = true;
-      requestAnimationFrame(() => {
+      queueMicrotask(() => {
         this.writeParsedQueued = false;
         if (!this.disposed) this.writeParsedEvent.fire(undefined);
       });
@@ -1363,46 +1780,17 @@ export class Terminal {
     return value;
   }
 
-  private updateSidecar(data: string | Uint8Array): void {
-    const decoded =
-      typeof data === 'string' ? data : this.modeDecoder.decode(data, { stream: true });
-    const value = this.modePending + decoded;
-    const lineFeeds = value.match(/\n/gu)?.length ?? 0;
-    for (let index = 0; index < lineFeeds; index += 1) this.lineFeedEvent.fire(undefined);
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: ESC starts an ANSI control sequence.
-    const mode = /\x1b\[([?]?)([\d;]+)([hl])/gu;
-    for (const match of value.matchAll(mode)) {
-      const enabled = match[3] === 'h';
-      const privateMode = match[1] === '?';
-      for (const raw of (match[2] ?? '').split(';')) {
-        const code = Number(raw);
-        if (!privateMode && code === 4) this.modeValues.insertMode = enabled;
-        if (privateMode && code === 1) this.modeValues.applicationCursorKeysMode = enabled;
-        if (privateMode && code === 6) this.modeValues.originMode = enabled;
-        if (privateMode && code === 7) this.modeValues.wraparoundMode = enabled;
-        if (privateMode && code === 45) this.modeValues.reverseWraparoundMode = enabled;
-        if (privateMode && code === 1004) this.modeValues.sendFocusMode = enabled;
-        if (privateMode && code === 2004) this.modeValues.bracketedPasteMode = enabled;
-        if (privateMode && code === 2026) this.modeValues.synchronizedOutputMode = enabled;
-        if (privateMode && (code === 47 || code === 1047 || code === 1049))
-          this.bufferValue.setAlternate(enabled);
-        if (privateMode && code === 9) this.modeValues.mouseTrackingMode = enabled ? 'x10' : 'none';
-        if (privateMode && code === 1000)
-          this.modeValues.mouseTrackingMode = enabled ? 'vt200' : 'none';
-        if (privateMode && code === 1002)
-          this.modeValues.mouseTrackingMode = enabled ? 'drag' : 'none';
-        if (privateMode && code === 1003)
-          this.modeValues.mouseTrackingMode = enabled ? 'any' : 'none';
+  private emitLineFeeds(data: string | Uint8Array): void {
+    if (!this.lineFeedEvent.hasListeners) return;
+    let count = 0;
+    if (typeof data === 'string') {
+      for (let index = 0; index < data.length; index += 1) {
+        if (data.charCodeAt(index) === 0x0a) count += 1;
       }
+    } else {
+      for (const byte of data) if (byte === 0x0a) count += 1;
     }
-    if (value.includes('\x1b=')) this.modeValues.applicationKeypadMode = true;
-    if (value.includes('\x1b>')) this.modeValues.applicationKeypadMode = false;
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: ESC starts an ANSI control sequence.
-    const incomplete = value.match(/\x1b(?:\[[?\d;]*|)$/u);
-    this.modePending =
-      incomplete && (incomplete.index ?? -1) + incomplete[0].length === value.length
-        ? incomplete[0]
-        : '';
+    for (let index = 0; index < count; index += 1) this.lineFeedEvent.fire(undefined);
   }
 
   private cssCellMetrics(): { cellWidthPx: number; cellHeightPx: number } {
@@ -1468,6 +1856,7 @@ export class Terminal {
       );
     }
     if (value.scrollback !== undefined && next.scrollback !== previous.scrollback) {
+      this.bufferValue.reserveNormal(this.rowsValue + (next.scrollback ?? 1000));
       this.queueNative((native) => native.setScrollbackLines(next.scrollback ?? 1000));
       this.updateScrollbarGutter();
     }
@@ -1548,6 +1937,23 @@ export class Terminal {
 function normalizeDimension(value: number | undefined, fallback: number, minimum: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
   return Math.max(minimum, Math.min(65_535, Math.trunc(value)));
+}
+
+function compatibilityRenderRange(
+  update: CoreCompatibilityUpdate,
+  state: TerminalBufferState,
+  rows: number
+): XtermRenderEvent | null {
+  if (update.dirty === 'full') return { start: 0, end: Math.max(0, rows - 1) };
+  let start = rows;
+  let end = -1;
+  for (const row of update.rows) {
+    const visible = row.index - state.viewportY;
+    if (visible < 0 || visible >= rows) continue;
+    start = Math.min(start, visible);
+    end = Math.max(end, visible);
+  }
+  return end >= start ? { start, end } : null;
 }
 
 function verifyIntegers(...values: number[]): void {

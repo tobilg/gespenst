@@ -1,3 +1,4 @@
+import { summarizeSamples } from './statistics.js';
 import type { BenchmarkCaseResult, BenchmarkReport, SampleSummary } from './types.js';
 
 interface FrameResult {
@@ -6,6 +7,13 @@ interface FrameResult {
   readonly implementation: string;
   readonly renderer: string;
   readonly cases: readonly BenchmarkCaseResult[];
+  readonly frameCadence: SampleSummary;
+  readonly health: {
+    readonly longTaskCount: number;
+    readonly longTaskTotalMs: number;
+    readonly longestTaskMs: number;
+  };
+  readonly validity: { readonly valid: boolean; readonly warnings: readonly string[] };
   readonly memory?: number;
   readonly error?: string;
 }
@@ -23,17 +31,25 @@ export async function runBenchmarkComparison(
   const startedAt = new Date().toISOString();
   const cases: BenchmarkCaseResult[] = [];
   const memory: Record<string, number> = {};
+  let frameCadence = summarizeSamples([], 'latency');
+  const warnings: string[] = [];
   for (const implementation of implementations) {
     log(`Benchmarking ${implementation.label} (${implementation.mode})`);
     const result = await runFrame(implementation.id);
     if (result.error) throw new Error(`${implementation.label}: ${result.error}`);
     cases.push(...result.cases);
+    frameCadence = result.frameCadence;
+    warnings.push(...result.validity.warnings.map((warning) => `${implementation.id}: ${warning}`));
     if (result.memory !== undefined) memory[implementation.id] = result.memory;
     log(`Completed ${implementation.label} with renderer ${result.renderer}`);
   }
   return {
+    schemaVersion: 2,
     startedAt,
     completedAt: new Date().toISOString(),
+    seed: 0x5e5e5e5e,
+    frameCadence,
+    validity: { valid: warnings.length === 0, warnings },
     cases,
     ...(Object.keys(memory).length ? { memory } : {}),
   };
@@ -42,7 +58,8 @@ export async function runBenchmarkComparison(
 function runFrame(implementation: string): Promise<FrameResult> {
   const token = crypto.randomUUID();
   const frame = document.createElement('iframe');
-  frame.hidden = true;
+  frame.title = `${implementation} performance benchmark`;
+  frame.style.cssText = 'display:block;width:960px;height:520px;border:0;margin:1rem 0';
   frame.src = `/benchmark.html?implementation=${encodeURIComponent(implementation)}&token=${encodeURIComponent(token)}`;
   document.body.append(frame);
   return new Promise((resolve, reject) => {
@@ -71,18 +88,5 @@ function runFrame(implementation: string): Promise<FrameResult> {
 }
 
 export function summarize(values: readonly number[]): SampleSummary {
-  const sorted = [...values].sort((left, right) => left - right);
-  const at = (fraction: number) =>
-    sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * fraction) - 1)] ?? 0;
-  return {
-    median: round(at(0.5)),
-    p95: round(at(0.95)),
-    minimum: round(sorted[0] ?? 0),
-    maximum: round(sorted.at(-1) ?? 0),
-    samples: values.map(round),
-  };
-}
-
-function round(value: number): number {
-  return Number(value.toFixed(3));
+  return summarizeSamples(values, 'latency');
 }

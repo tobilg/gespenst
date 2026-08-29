@@ -23,6 +23,7 @@ describe('xterm buffer views', () => {
     expect(line?.translateToString(true, 0, 3)).toBe('😀X');
     expect(line?.getCell(-1)).toBeUndefined();
     expect(line?.getCell(5)).toBeUndefined();
+    expect(line?.getCell(4)?.getWidth()).toBe(1);
     expect(second).toBe(first);
     expect(second?.getWidth()).toBe(1);
     expect(second?.getChars()).toBe('X');
@@ -86,6 +87,45 @@ describe('xterm buffer views', () => {
     const replaced = view.update(snapshotRows(['u', 'v'], 4), 4);
     expect(replaced.identityReset).toBe(true);
     expect(view.length).toBe(2);
+  });
+
+  it('keeps retained rows stable across incremental ring-buffer trims and growth', () => {
+    const view = new BufferView('normal', 4, 2);
+    view.update(snapshotRows(['a', 'b', 'c', 'd', 'e', 'f'], 1), 4);
+
+    const firstTrim = view.update(snapshotRows(['f', 'g'], 2, 4, 6), 4);
+    expect(firstTrim).toEqual({ missing: null, trimmed: 1, identityReset: false });
+    expect(view.getLine(0)?.translateToString(true)).toBe('b');
+    expect(view.getLine(4)?.translateToString(true)).toBe('f');
+    expect(view.getLine(5)?.translateToString(true)).toBe('g');
+
+    const secondTrim = view.update(snapshotRows(['g', 'h'], 3, 4, 6), 4);
+    expect(secondTrim).toEqual({ missing: null, trimmed: 1, identityReset: false });
+    expect(view.getLine(0)?.translateToString(true)).toBe('c');
+    expect(view.getLine(5)?.translateToString(true)).toBe('h');
+
+    const growth = view.update(snapshotRows(['i'], 4, 6, 7), 4);
+    expect(growth).toEqual({ missing: null, trimmed: 0, identityReset: false });
+    expect(view.length).toBe(7);
+    expect(view.getLine(6)?.translateToString(true)).toBe('i');
+  });
+
+  it('applies semantic trim, append, and reset operations without identity inference', () => {
+    const view = new BufferView('normal', 4, 2, 8);
+    view.update(snapshotRows(['a', 'b', 'c', 'd', 'e', 'f'], 1), 4);
+
+    const first = view.update(semanticRows(['f', 'g'], 2, 4, 6, { trimmed: 1, appendStart: 5 }), 4);
+    expect(first).toEqual({ missing: null, trimmed: 1, identityReset: false });
+    expect(view.getLine(0)?.translateToString(true)).toBe('b');
+    expect(view.getLine(5)?.translateToString(true)).toBe('g');
+
+    const reset = view.update(
+      semanticRows(['u', 'v'], 3, 0, 2, { reset: true, appendStart: 0 }),
+      4
+    );
+    expect(reset).toEqual({ missing: null, trimmed: 0, identityReset: true });
+    expect(view.getLine(0)?.translateToString(true)).toBe('u');
+    expect(view.getLine(1)?.translateToString(true)).toBe('v');
   });
 
   it('switches normal and alternate buffers and emits only actual changes', () => {
@@ -164,6 +204,21 @@ function snapshotRows(
       wrapContinuation: false,
       selection: null,
     })),
+  };
+}
+
+function semanticRows(
+  ids: readonly string[],
+  revision: number,
+  start: number,
+  totalRows: number,
+  operations: { readonly trimmed?: number; readonly appendStart: number; readonly reset?: boolean }
+) {
+  return {
+    ...snapshotRows(ids, revision, start, totalRows),
+    trimmed: operations.trimmed ?? 0,
+    appendStart: operations.appendStart,
+    reset: operations.reset ?? false,
   };
 }
 
