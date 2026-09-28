@@ -12,7 +12,11 @@ export default defineConfig({
   test: {
     name: 'node',
     environment: 'node',
-    include: ['packages/*/tests/**/*.test.ts', 'scripts/**/*.test.ts'],
+    include: [
+      'packages/*/tests/**/*.test.ts',
+      'apps/*/tests/node/**/*.test.ts',
+      'scripts/**/*.test.ts',
+    ],
     exclude: ['packages/*/tests/browser/**/*.test.ts'],
     benchmark: {
       include: ['packages/*/tests/**/*.bench.ts'],

@@ -63,7 +63,7 @@ The browser-only demo needs no server process, service-worker bootstrap, or cros
 1. Create the project, whose name must match the `--project-name` in `release.yml`:
 
    ```sh
-   pnpm dlx wrangler@4 pages project create gespenst-docs --production-branch=main
+   pnpm dlx --allow-build=esbuild --allow-build=workerd wrangler@4 pages project create gespenst-docs --production-branch=main
    ```
 
 2. Create a Cloudflare API token with the **Cloudflare Pages: Edit** permission on the account.

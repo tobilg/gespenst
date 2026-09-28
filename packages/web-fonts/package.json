@@ -2,12 +2,25 @@
   "name": "@gespenst/web-fonts",
   "version": "0.1.2",
   "description": "Worker-safe web font loading for gespenst",
+  "keywords": [
+    "terminal",
+    "terminal-emulator",
+    "ghostty",
+    "wasm",
+    "typescript",
+    "fonts",
+    "web-fonts"
+  ],
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tobilg/gespenst.git",
     "directory": "packages/web-fonts"
+  },
+  "homepage": "https://gespenst.dev",
+  "bugs": {
+    "url": "https://github.com/tobilg/gespenst/issues"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

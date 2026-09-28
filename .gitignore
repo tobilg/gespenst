@@ -154,6 +154,7 @@ test-results/benchmarks/
 apps/docs/public/*
 !apps/docs/public/_headers
 !apps/docs/public/opengraph.png
+!apps/docs/public/favicon.svg
 
 .probe*
 

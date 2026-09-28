@@ -2,12 +2,26 @@
   "name": "@gespenst/websocket",
   "version": "0.1.2",
   "description": "Binary WebSocket transport and reconnect support for gespenst",
+  "keywords": [
+    "terminal",
+    "terminal-emulator",
+    "ghostty",
+    "wasm",
+    "typescript",
+    "websocket",
+    "pty",
+    "transport"
+  ],
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tobilg/gespenst.git",
     "directory": "packages/websocket"
+  },
+  "homepage": "https://gespenst.dev",
+  "bugs": {
+    "url": "https://github.com/tobilg/gespenst/issues"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

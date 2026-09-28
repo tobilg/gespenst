@@ -21,6 +21,11 @@ const requiredPages = [
   'api/documents/Core_Guide.Headless_Runtime.html',
   'api/documents/Core_Guide.Migrating_from_xterm.js.html',
   'api/documents/Core_Guide.Troubleshooting.html',
+  '404.html',
+  'robots.txt',
+  'sitemap.xml',
+  'llms.txt',
+  'favicon.svg',
 ];
 const guideTitles = [
   'Core Guide',
@@ -41,6 +46,7 @@ for (const page of requiredPages) await assertFile(resolve(outputDirectory, page
 await assertDeploymentHeaders();
 await assertNoRetiredRuntimeArtifacts();
 await assertSocialImage();
+await assertSitemap();
 
 const htmlFiles = await collectFiles(outputDirectory, (file) => extname(file) === '.html');
 const errors = [];
@@ -63,7 +69,8 @@ for (const file of htmlFiles) {
       errors.push(`${sourceName}: link escapes documentation output: ${reference}`);
       continue;
     }
-    if (!(await fileExists(target.file))) {
+    target.file = await servedFile(target.file);
+    if (!target.file) {
       errors.push(`${sourceName}: missing target for ${reference}`);
       continue;
     }
@@ -168,6 +175,39 @@ function webPath(value) {
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/** Cloudflare Pages serves `/page` from `page.html`, and the site links to that clean form. */
+async function servedFile(file) {
+  if (await fileExists(file)) return file;
+  if (await fileExists(`${file}.html`)) return `${file}.html`;
+  return undefined;
+}
+
+/** Every sitemap entry must be an absolute, extensionless URL that the deployment serves. */
+async function assertSitemap() {
+  const siteUrl = (process.env.DOCS_SITE_URL ?? 'https://gespenst.dev').replace(/\/+$/u, '');
+  const source = await readFile(resolve(outputDirectory, 'sitemap.xml'), 'utf8');
+  const locations = [...source.matchAll(/<loc>([^<]+)<\/loc>/gu)].map((match) => match[1] ?? '');
+  const failures = [];
+  if (locations.length < requiredPages.filter((page) => page.endsWith('.html')).length - 1) {
+    failures.push(`only ${locations.length} URLs listed`);
+  }
+  for (const location of locations) {
+    if (!location.startsWith(`${siteUrl}/`)) failures.push(`${location}: outside ${siteUrl}`);
+    else if (location.endsWith('.html')) failures.push(`${location}: redirecting .html URL`);
+    else {
+      const path = safeDecode(location.slice(siteUrl.length + 1));
+      const file = resolve(
+        outputDirectory,
+        path.endsWith('/') || path === '' ? `${path}index.html` : path
+      );
+      if (!(await servedFile(file))) failures.push(`${location}: no page`);
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(`Sitemap verification failed:\n${failures.map((f) => `- ${f}`).join('\n')}`);
+  }
 }
 
 async function fileExists(file) {

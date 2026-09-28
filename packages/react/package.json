@@ -2,12 +2,26 @@
   "name": "@gespenst/react",
   "version": "0.1.2",
   "description": "React bindings for the Ghostty-powered web terminal",
+  "keywords": [
+    "terminal",
+    "terminal-emulator",
+    "ghostty",
+    "wasm",
+    "typescript",
+    "react",
+    "react-component",
+    "web-terminal"
+  ],
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tobilg/gespenst.git",
     "directory": "packages/react"
+  },
+  "homepage": "https://gespenst.dev",
+  "bugs": {
+    "url": "https://github.com/tobilg/gespenst/issues"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

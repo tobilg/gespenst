@@ -8,11 +8,15 @@ a dedicated worker by default, WebGPU/WebGL2 accelerate cell backgrounds, Canvas
 browser-quality text shaping, and Canvas 2D is also the universal fallback. An optional compatibility
 package implements the stable xterm.js 6.0 public API on top.
 
+**[Website, live demo, and API reference → gespenst.dev](https://gespenst.dev)**
+
 > Ghostty's `tip` artifact is a nightly build. Published package versions pin and checksum one exact
 > artifact; pin your `@gespenst/*` versions in production.
 
 ## Documentation
 
+- [gespenst.dev](https://gespenst.dev) hosts the live demo, the Core Guide, and the full API
+  reference.
 - [Core guide](docs/core/index.md) covers setup, PTY connections, configuration, fonts, events,
   performance, headless use, migration, and troubleshooting.
 - [Core package README](packages/core/README.md) is the focused npm-package introduction.

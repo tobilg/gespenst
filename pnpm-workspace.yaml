@@ -4,6 +4,8 @@ packages:
   - examples/*
   - benchmarks
   - tools/*
+allowBuilds:
+  esbuild: false
 
 catalog:
   '@biomejs/biome': 2.2.4

@@ -3,6 +3,8 @@
 A high-performance browser terminal and headless VT runtime powered by the official nightly
 [`ghostty-vt.wasm`](https://github.com/ghostty-org/ghostty/releases/download/tip/ghostty-vt.wasm).
 
+Documentation, guides, and a live demo: **[gespenst.dev](https://gespenst.dev)**
+
 The native API is byte-oriented and built around Web Streams. Browser terminals use worker
 isolation when available, select WebGPU, WebGL2, or Canvas 2D at runtime, and keep application policy
 outside the renderer.

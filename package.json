@@ -35,7 +35,7 @@
     "docs:dev": "pnpm --dir apps/docs run prepare:content && node scripts/vite-dev.mjs apps/docs",
     "docs:build": "pnpm --filter @gespenst/docs build && pnpm docs:verify",
     "docs:verify": "node scripts/verify-docs.mjs",
-    "docs:deploy": "pnpm dlx wrangler@4 pages deploy apps/docs/dist --project-name=gespenst-docs",
+    "docs:deploy": "pnpm dlx --allow-build=esbuild --allow-build=workerd wrangler@4 pages deploy apps/docs/dist --project-name=gespenst-docs",
     "lint": "biome check packages scripts demo examples benchmarks harness apps tools docs index.html package.json pnpm-workspace.yaml biome.json tsconfig.json typedoc.json vite.workspace.config.ts vitest.config.ts vitest.browser.config.ts vitest.browser.compat.config.ts vitest.coverage.config.ts",
     "format": "biome format --write packages scripts demo examples benchmarks harness apps tools docs index.html package.json pnpm-workspace.yaml biome.json tsconfig.json typedoc.json vite.workspace.config.ts vitest.config.ts vitest.browser.config.ts vitest.browser.compat.config.ts vitest.coverage.config.ts",
     "update:wasm": "node scripts/update-wasm.mjs",

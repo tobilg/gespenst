@@ -2,11 +2,31 @@
   "name": "@gespenst/core",
   "version": "0.1.2",
   "description": "A fast Ghostty-powered terminal emulator for TypeScript and the web",
+  "keywords": [
+    "terminal",
+    "terminal-emulator",
+    "ghostty",
+    "wasm",
+    "typescript",
+    "xterm",
+    "xterm.js",
+    "vt100",
+    "webgpu",
+    "webgl",
+    "canvas",
+    "pty",
+    "web-terminal",
+    "browser"
+  ],
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tobilg/gespenst.git"
+  },
+  "homepage": "https://gespenst.dev",
+  "bugs": {
+    "url": "https://github.com/tobilg/gespenst/issues"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="noindex" />
+    <meta name="theme-color" content="#f2f0ea" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#181a17" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" href="%BASE_URL%favicon.svg" type="image/svg+xml" />
+    <title>Page not found · gespenst</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#top">Skip to content</a>
+
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="wordmark" href="%BASE_URL%">gespenst</a>
+        <nav aria-label="Primary navigation">
+          <a href="%BASE_URL%#install">Install</a>
+          <a href="%BASE_URL%#packages">Packages</a>
+          <a href="%BASE_URL%#architecture">Architecture</a>
+          <a href="%BASE_URL%#guides">Guides</a>
+          <a href="%BASE_URL%example">Example</a>
+          <a href="%BASE_URL%api/">API</a>
+          <a class="nav-external" href="https://github.com/tobilg/gespenst">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="not-found" aria-labelledby="not-found-title">
+        <p class="eyebrow">404</p>
+        <h1 id="not-found-title">This page is a ghost.</h1>
+        <p class="hero-summary">
+          Nothing lives at this address. The page may have moved when the API reference was
+          regenerated, or the link may be mistyped.
+        </p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="%BASE_URL%">Back to the home page</a>
+          <a class="button button-secondary" href="%BASE_URL%api/documents/Core_Guide">Read the Core Guide</a>
+          <a class="button button-secondary" href="%BASE_URL%api/">Search the API</a>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/not-found.ts"></script>
+  </body>
+</html>

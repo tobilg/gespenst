@@ -2,12 +2,26 @@
   "name": "@gespenst/clipboard",
   "version": "0.1.2",
   "description": "Permission-aware Kitty clipboard protocol support for gespenst",
+  "keywords": [
+    "terminal",
+    "terminal-emulator",
+    "ghostty",
+    "wasm",
+    "typescript",
+    "clipboard",
+    "kitty",
+    "paste"
+  ],
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tobilg/gespenst.git",
     "directory": "packages/clipboard"
+  },
+  "homepage": "https://gespenst.dev",
+  "bugs": {
+    "url": "https://github.com/tobilg/gespenst/issues"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

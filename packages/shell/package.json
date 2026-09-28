@@ -2,12 +2,27 @@
   "name": "@gespenst/shell",
   "version": "0.1.2",
   "description": "Portable browser Bash facade for gespenst powered by BashKit",
+  "keywords": [
+    "terminal",
+    "terminal-emulator",
+    "ghostty",
+    "wasm",
+    "typescript",
+    "bash",
+    "shell",
+    "browser",
+    "bashkit"
+  ],
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/tobilg/gespenst.git",
     "directory": "packages/shell"
+  },
+  "homepage": "https://gespenst.dev",
+  "bugs": {
+    "url": "https://github.com/tobilg/gespenst/issues"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
