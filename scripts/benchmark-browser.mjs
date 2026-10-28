@@ -229,19 +229,18 @@ async function buildConsumer(key, source, workspacePackages, upstream) {
       ...dependencies,
       '@xterm/xterm': upstream.version,
       typescript: '7.0.2',
-      vite: '8.2.2',
+      vite: '8.2.4',
     },
-    ...(source.kind === 'workspace'
-      ? {
-          pnpm: {
-            overrides: {
-              '@gespenst/core': `file:${workspacePackages['@gespenst/core'].archive}`,
-            },
-          },
-        }
-      : {}),
   };
   await writeFile(resolve(consumerRoot, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  // The packed xterm adapter must use the packed core, not the release on npm.
+  if (source.kind === 'workspace')
+    await writeFile(
+      resolve(consumerRoot, 'pnpm-workspace.yaml'),
+      overridesYaml({
+        '@gespenst/core': `file:${workspacePackages['@gespenst/core'].archive}`,
+      })
+    );
   console.log(`Installing isolated ${key} consumer from ${source.raw}…`);
   await run(
     'pnpm',
@@ -773,4 +772,12 @@ function contentType(file) {
 
 function round(value) {
   return Number(value.toFixed(3));
+}
+
+/** pnpm reads overrides only from `pnpm-workspace.yaml`. */
+function overridesYaml(overrides) {
+  const entries = Object.entries(overrides).map(
+    ([name, spec]) => `  ${JSON.stringify(name)}: ${JSON.stringify(spec)}\n`
+  );
+  return `overrides:\n${entries.join('')}`;
 }

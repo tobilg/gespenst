@@ -185,8 +185,10 @@ await terminal.ready;
 ```
 
 For applications that create multiple terminals, `preloadXtermRuntime()` compiles both WASM
-artifacts ahead of time. Native worker and renderer controls are available under the constructor's
-nested `gespenst` option without changing the xterm.js option surface; see the
+artifacts ahead of time. Like xterm.js, the package parses output on the main thread, so `buffer`
+reads are synchronous; rows are read from Ghostty only when requested. Renderer and WASM controls
+are available under the constructor's nested `gespenst` option without changing the xterm.js option
+surface; see the
 [`@gespenst/xterm` guide](./packages/xterm/README.md#runtime-and-performance-controls).
 
 The package copies the xterm.js 6.0 stable public declarations, so existing TypeScript integrations
@@ -307,8 +309,11 @@ branches, 78% functions, and 82% lines, with higher line and branch floors for a
 The package-specific thresholds live beside the coverage configuration in
 `vitest.coverage.config.ts`, so raising a floor is an explicit reviewed change.
 
-`pnpm verify:wasm` validates the vendored checksum, build metadata, imports, exports, and ABI schema;
-`pnpm update:wasm` fetches and records a newer official nightly.
+`pnpm verify:wasm` validates the vendored checksum, Ghostty's minisign signature, build metadata,
+imports, exports, and ABI schema. `pnpm update:wasm` fetches the official nightly and writes nothing
+unless the bytes match the GitHub release digest, the signature verifies against Ghostty's pinned
+release key, and no required export changed its signature. It records the exact source commit and
+prints the export and ABI changes for review. Set `GH_TOKEN` to avoid GitHub API rate limits.
 
 `pnpm docs:api` generates the complete, searchable TypeDoc reference for every public workspace
 package in `apps/docs/public/api`. Documentation validation fails when a public class, interface,

@@ -1,12 +1,17 @@
-import type { AbiBitField } from './abi.js';
+import { type CellBitFields, cellBitFields, packedBits } from './abi.js';
 import type { Allocation, GhosttyBindings } from './bindings.js';
+import {
+  pendingDirtyState,
+  type RenderStateReader,
+  type SharedRenderState,
+} from './render-state.js';
 import type {
   CellColor,
   CellStyle,
   CellWidth,
   CursorStyle,
-  DirtyState,
   RenderCell,
+  RenderColor,
   RenderColors,
   RenderCursor,
   RenderFrame,
@@ -27,8 +32,12 @@ const DEFAULT_STYLE: CellStyle = Object.freeze({
   underline: 0,
 });
 
-function dirtyState(value: number): DirtyState {
-  return value === 2 ? 'full' : value === 1 ? 'partial' : 'clean';
+/** Style-derived values of a cell, shared by cells with the same style in one row. */
+interface CellStyling {
+  readonly style: CellStyle;
+  readonly foreground: RenderColor | null;
+  readonly background: RenderColor | null;
+  readonly sources: Pick<RenderCell, 'foregroundSource' | 'backgroundSource' | 'underlineSource'>;
 }
 
 function cursorStyle(value: number): CursorStyle {
@@ -52,21 +61,14 @@ function semanticContent(value: number): SemanticContent {
   return 'unknown';
 }
 
-function packedBits(low: number, high: number, field: AbiBitField): number {
-  const mask = 2 ** field.width - 1;
-  if (field.lsb >= 32) return (high >>> (field.lsb - 32)) & mask;
-  if (field.lsb + field.width <= 32) return (low >>> field.lsb) & mask;
-  return ((low >>> field.lsb) | (high << (32 - field.lsb))) & mask;
-}
-
 export class RenderReader {
-  private readonly state: number;
+  private readonly renderState: SharedRenderState;
+  private readonly pending: RenderStateReader;
   private readonly iterator: number;
   private readonly iteratorSlot: Allocation;
   private readonly cells: number;
   private readonly cellsSlot: Allocation;
   private readonly scalar: Allocation;
-  private readonly yValue: Allocation;
   private readonly cursorValue: Allocation;
   private readonly colorsValue: Allocation;
   private readonly cellsView: Allocation;
@@ -79,35 +81,14 @@ export class RenderReader {
   private disposed = false;
   private lastFrame: RenderFrame | null = null;
   private readonly bindings: GhosttyBindings;
-  private readonly cellBits: Readonly<{
-    contentTag: AbiBitField;
-    content: AbiBitField;
-    codepoint: AbiBitField;
-    styleId: AbiBitField;
-    wide: AbiBitField;
-    hyperlink: AbiBitField;
-    semanticContent: AbiBitField;
-    tagCodepoint: number;
-    tagGrapheme: number;
-  }>;
+  private readonly cellBits: CellBitFields;
 
-  constructor(bindings: GhosttyBindings) {
+  constructor(bindings: GhosttyBindings, renderState: SharedRenderState) {
     this.bindings = bindings;
-    this.cellBits = {
-      contentTag: bindings.abi.bit('GhosttyCell', 'content_tag'),
-      content: bindings.abi.bit('GhosttyCell', 'content'),
-      codepoint: bindings.abi.bit('GhosttyCell', 'content', 'CODEPOINT', 'codepoint'),
-      styleId: bindings.abi.bit('GhosttyCell', 'style_id'),
-      wide: bindings.abi.bit('GhosttyCell', 'wide'),
-      hyperlink: bindings.abi.bit('GhosttyCell', 'hyperlink'),
-      semanticContent: bindings.abi.bit('GhosttyCell', 'semantic_content'),
-      tagCodepoint: bindings.abi.value('GhosttyCellContentTag', 'CODEPOINT'),
-      tagGrapheme: bindings.abi.value('GhosttyCellContentTag', 'CODEPOINT_GRAPHEME'),
-    };
+    this.renderState = renderState;
+    this.pending = renderState.register();
+    this.cellBits = cellBitFields(bindings.abi);
     const e = bindings.exports;
-    this.state = bindings.createHandle('ghostty_render_state_new', (slot) =>
-      e.ghostty_render_state_new(0, slot)
-    );
     this.iterator = bindings.createHandle('ghostty_render_state_row_iterator_new', (slot) =>
       e.ghostty_render_state_row_iterator_new(0, slot)
     );
@@ -119,7 +100,6 @@ export class RenderReader {
     this.cellsSlot = bindings.alloc(4);
     this.cellsSlot.view.setUint32(0, this.cells, true);
     this.scalar = bindings.alloc(8);
-    this.yValue = bindings.alloc(2);
     this.cursorValue = bindings.allocType('GhosttyRenderStateCursor', true);
     this.colorsValue = bindings.allocType('GhosttyRenderStateColors', true);
     this.cellsView = bindings.allocType('GhosttyCellsView');
@@ -133,11 +113,12 @@ export class RenderReader {
   read(terminal: number): RenderFrame {
     this.ensureActive();
     const e = this.bindings.exports;
-    this.bindings.check(e.ghostty_render_state_update(this.state, terminal), 'update render state');
+    this.renderState.update(terminal);
+    const pending = this.pending.take();
 
     const cols = this.getU16('GhosttyRenderStateData', 'COLS');
     const rows = this.getU16('GhosttyRenderStateData', 'ROWS');
-    const dirty = dirtyState(this.getI32('GhosttyRenderStateData', 'DIRTY'));
+    const dirty = pendingDirtyState(pending);
     const cursor = this.readCursor();
     const colors = this.readColors();
     const changedRows: RenderRow[] = [];
@@ -145,19 +126,24 @@ export class RenderReader {
     if (dirty !== 'clean') {
       this.bindings.check(
         e.ghostty_render_state_get(
-          this.state,
+          this.renderState.handle,
           this.bindings.abi.value('GhosttyRenderStateData', 'ROW_ITERATOR'),
           this.iteratorSlot.pointer
         ),
         'bind render row iterator'
       );
-      while (e.ghostty_render_state_row_iterator_next_dirty(this.iterator, this.yValue.pointer)) {
-        const y = this.yValue.view.getUint16(0, true);
+      let remaining = pending.all ? rows : pending.rows.size;
+      for (
+        let y = 0;
+        remaining > 0 && e.ghostty_render_state_row_iterator_next(this.iterator);
+        y++
+      ) {
+        if (!pending.all && !pending.rows.has(y)) continue;
+        remaining -= 1;
         const row = this.readRow(y, cols);
         this.rowCache.set(y, row);
         changedRows.push(row);
       }
-      this.bindings.check(e.ghostty_render_state_clean(this.state), 'clean render state');
     }
 
     for (const y of [...this.rowCache.keys()]) {
@@ -187,6 +173,7 @@ export class RenderReader {
   invalidate(): void {
     this.rowCache.clear();
     this.lastFrame = null;
+    this.pending.invalidate();
   }
 
   dispose(): void {
@@ -195,12 +182,10 @@ export class RenderReader {
     const e = this.bindings.exports;
     e.ghostty_render_state_row_cells_free(this.cells);
     e.ghostty_render_state_row_iterator_free(this.iterator);
-    e.ghostty_render_state_free(this.state);
     for (const allocation of [
       this.scalar,
       this.iteratorSlot,
       this.cellsSlot,
-      this.yValue,
       this.cursorValue,
       this.colorsValue,
       this.cellsView,
@@ -221,7 +206,7 @@ export class RenderReader {
 
   private stateGet(data: string, out: number): number {
     return this.bindings.exports.ghostty_render_state_get(
-      this.state,
+      this.renderState.handle,
       this.bindings.abi.value('GhosttyRenderStateData', data),
       out
     );
@@ -230,11 +215,6 @@ export class RenderReader {
   private getU16(type: string, data: string): number {
     this.bindings.check(this.stateGet(data, this.scalar.pointer), `read ${type}.${data}`);
     return this.scalar.view.getUint16(0, true);
-  }
-
-  private getI32(type: string, data: string): number {
-    this.bindings.check(this.stateGet(data, this.scalar.pointer), `read ${type}.${data}`);
-    return this.scalar.view.getInt32(0, true);
   }
 
   private readCursor(): RenderCursor {
@@ -320,14 +300,16 @@ export class RenderReader {
     const renderCells: RenderCell[] = [];
     const memory = new DataView(this.bindings.exports.memory.buffer);
     let text = '';
+    // Cells of one row share a page, so equal style ids within the row mean equal styles.
+    let lastStyleId = 0;
+    let lastStyling: CellStyling | null = null;
     for (let x = 0; x < cellCount; x += 1) {
       const pointer = cellsPointer + x * 8;
       const low = memory.getUint32(pointer, true);
       const high = memory.getUint32(pointer + 4, true);
       const tag = packedBits(low, high, this.cellBits.contentTag);
       const content = packedBits(low, high, this.cellBits.content);
-      const codepoint =
-        (content >>> this.cellBits.codepoint.lsb) & (2 ** this.cellBits.codepoint.width - 1);
+      const codepoint = (content >>> this.cellBits.codepoint.lsb) & this.cellBits.codepoint.mask;
       const styleId = packedBits(low, high, this.cellBits.styleId);
       const width = cellWidth(packedBits(low, high, this.cellBits.wide));
       const hyperlink = packedBits(low, high, this.cellBits.hyperlink) === 1;
@@ -338,26 +320,43 @@ export class RenderReader {
           : tag === this.cellBits.tagGrapheme
             ? this.readGrapheme(x)
             : '';
-      const style = styleId === 0 ? DEFAULT_STYLE : this.readStyle(x);
-      const foreground = styleId === 0 ? null : this.readOptionalColor(x, 'FG_COLOR');
       const textContentTag =
         tag === this.cellBits.tagCodepoint || tag === this.cellBits.tagGrapheme;
-      const background =
-        styleId === 0 && textContentTag ? null : this.readOptionalColor(x, 'BG_COLOR');
+      let styling: CellStyling;
+      if (styleId === 0) {
+        styling = {
+          style: DEFAULT_STYLE,
+          foreground: null,
+          background: textContentTag ? null : this.readOptionalColor(x, 'BG_COLOR'),
+          sources: {},
+        };
+      } else if (textContentTag && styleId === lastStyleId && lastStyling) {
+        styling = lastStyling;
+      } else {
+        styling = {
+          style: this.readStyle(x),
+          foreground: this.readOptionalColor(x, 'FG_COLOR'),
+          background: this.readOptionalColor(x, 'BG_COLOR'),
+          sources: {
+            foregroundSource: this.readStyleColorSource('fg_color'),
+            backgroundSource: this.readStyleColorSource('bg_color'),
+            underlineSource: this.readStyleColorSource('underline_color'),
+          },
+        };
+        // A background-only cell takes its color from the cell, not from its style.
+        if (textContentTag) {
+          lastStyleId = styleId;
+          lastStyling = styling;
+        }
+      }
       const cell: RenderCell = {
         x,
         text: cellText,
         width,
-        style,
-        foreground,
-        background,
-        ...(styleId === 0
-          ? {}
-          : {
-              foregroundSource: this.readStyleColorSource('fg_color'),
-              backgroundSource: this.readStyleColorSource('bg_color'),
-              underlineSource: this.readStyleColorSource('underline_color'),
-            }),
+        style: styling.style,
+        foreground: styling.foreground,
+        background: styling.background,
+        ...styling.sources,
         hyperlink,
         semanticContent: semantic,
       };

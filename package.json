@@ -1,12 +1,12 @@
 {
   "name": "gespenst-workspace",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.33.3",
+  "packageManager": "pnpm@12.15.0",
   "engines": {
     "node": "^20.19.0 || >=22.12.0",
-    "pnpm": ">=10.33.3"
+    "pnpm": ">=12.15.0"
   },
   "scripts": {
     "dev": "vite --config packages/core/vite.config.ts",
@@ -63,7 +63,7 @@
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:",
-    "vue": "3.5.21",
+    "vue": "3.5.44",
     "wabt": "1.0.39",
     "ws": "8.21.3"
   }

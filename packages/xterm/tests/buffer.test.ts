@@ -1,18 +1,19 @@
-import type { RenderCell, TerminalBufferSnapshot } from '@gespenst/core';
+import type { RenderCell, TerminalBufferState } from '@gespenst/core';
 import { describe, expect, it, vi } from 'vitest';
-import { BufferCell, BufferNamespace, BufferView } from '../src/buffer';
+import { BufferCell, BufferNamespace, BufferView, type PackedBufferRow } from '../src/buffer';
 
 describe('xterm buffer views', () => {
   it('maps every stable cell attribute and translates visual columns', () => {
+    const row = packedRow([
+      styledCell(0, '😀', 'wide'),
+      styledCell(1, '', 'spacer-tail'),
+      styledCell(2, 'X', 'narrow'),
+    ]);
     const view = new BufferView('normal', 5, 1);
-    view.update(
-      snapshot([
-        styledCell(0, '😀', 'wide'),
-        styledCell(1, '', 'spacer-tail'),
-        styledCell(2, 'X', 'narrow'),
-      ]),
-      5
-    );
+    view.attach({
+      state: () => ({ ...textSource([], 1).source.state(), viewportY: 0 }),
+      rows: () => [row],
+    });
     const line = view.getLine(0);
     const first = line?.getCell(0);
     const second = line?.getCell(2, first);
@@ -70,77 +71,94 @@ describe('xterm buffer views', () => {
     expect(empty.isAttributeDefault()).toBe(true);
   });
 
-  it('reports missing pages, shifts retained rows, and detects complete replacement', () => {
+  it('reads rows in blocks on first use and keeps them until they change', () => {
+    const rows = textSource(['a', 'b', 'c', 'd'], 200);
     const view = new BufferView('normal', 4, 2);
-    const first = view.update(snapshotRows(['a', 'b', 'c'], 1), 4);
-    expect(first).toEqual({ missing: null, trimmed: 0, identityReset: false });
+    view.attach(rows.source);
+    expect(rows.stateReads).toBe(0);
+    expect(view.length).toBe(200);
+    expect(view.baseY).toBe(198);
 
-    const partial = view.update(snapshotRows(['x'], 2, 2, 3), 4);
-    expect(partial.missing).toEqual({ start: 0, end: 3 });
-    expect(partial.identityReset).toBe(false);
-
-    const shifted = view.update(snapshotRows(['b', 'c', 'd'], 3), 4);
-    expect(shifted.trimmed).toBe(1);
-    expect(shifted.identityReset).toBe(false);
-    expect(view.getLine(0)?.translateToString(true)).toBe('b');
-
-    const replaced = view.update(snapshotRows(['u', 'v'], 4), 4);
-    expect(replaced.identityReset).toBe(true);
-    expect(view.length).toBe(2);
+    expect(view.getLine(100)?.translateToString(true)).toBe('row 100');
+    expect(view.getLine(70)?.translateToString(true)).toBe('row 70');
+    expect(view.getLine(199)?.translateToString(true)).toBe('row 199');
+    expect(rows.reads).toEqual([
+      [64, 128],
+      [192, 200],
+    ]);
+    expect(view.getLine(200)).toBeUndefined();
+    expect(view.getLine(-1)).toBeUndefined();
+    expect(view.getLine(1.5)).toBeUndefined();
   });
 
-  it('keeps retained rows stable across incremental ring-buffer trims and growth', () => {
+  it('shifts cached rows on trim and drops rows at or after the first dirty row', () => {
+    const rows = textSource([], 200);
     const view = new BufferView('normal', 4, 2);
-    view.update(snapshotRows(['a', 'b', 'c', 'd', 'e', 'f'], 1), 4);
+    view.attach(rows.source, rows.source.state());
+    for (const y of [10, 100, 199]) view.getLine(y);
+    expect(rows.reads).toHaveLength(3);
 
-    const firstTrim = view.update(snapshotRows(['f', 'g'], 2, 4, 6), 4);
-    expect(firstTrim).toEqual({ missing: null, trimmed: 1, identityReset: false });
-    expect(view.getLine(0)?.translateToString(true)).toBe('b');
-    expect(view.getLine(4)?.translateToString(true)).toBe('f');
-    expect(view.getLine(5)?.translateToString(true)).toBe('g');
+    rows.shift(3);
+    view.apply({ state: rows.source.state(), trimmed: 3, reset: false, dirtyFrom: 150 });
+    expect(view.getLine(7)?.translateToString(true)).toBe('row 10');
+    expect(view.getLine(97)?.translateToString(true)).toBe('row 100');
+    expect(rows.reads).toHaveLength(3);
+    expect(view.getLine(196)?.translateToString(true)).toBe('row 199');
+    expect(rows.reads).toHaveLength(4);
 
-    const secondTrim = view.update(snapshotRows(['g', 'h'], 3, 4, 6), 4);
-    expect(secondTrim).toEqual({ missing: null, trimmed: 1, identityReset: false });
-    expect(view.getLine(0)?.translateToString(true)).toBe('c');
-    expect(view.getLine(5)?.translateToString(true)).toBe('h');
-
-    const growth = view.update(snapshotRows(['i'], 4, 6, 7), 4);
-    expect(growth).toEqual({ missing: null, trimmed: 0, identityReset: false });
-    expect(view.length).toBe(7);
-    expect(view.getLine(6)?.translateToString(true)).toBe('i');
+    view.apply({ state: rows.source.state(), trimmed: 0, reset: true, dirtyFrom: 0 });
+    view.getLine(7);
+    expect(rows.reads).toHaveLength(5);
   });
 
-  it('applies semantic trim, append, and reset operations without identity inference', () => {
-    const view = new BufferView('normal', 4, 2, 8);
-    view.update(snapshotRows(['a', 'b', 'c', 'd', 'e', 'f'], 1), 4);
-
-    const first = view.update(semanticRows(['f', 'g'], 2, 4, 6, { trimmed: 1, appendStart: 5 }), 4);
-    expect(first).toEqual({ missing: null, trimmed: 1, identityReset: false });
-    expect(view.getLine(0)?.translateToString(true)).toBe('b');
-    expect(view.getLine(5)?.translateToString(true)).toBe('g');
-
-    const reset = view.update(
-      semanticRows(['u', 'v'], 3, 0, 2, { reset: true, appendStart: 0 }),
-      4
-    );
-    expect(reset).toEqual({ missing: null, trimmed: 0, identityReset: true });
-    expect(view.getLine(0)?.translateToString(true)).toBe('u');
-    expect(view.getLine(1)?.translateToString(true)).toBe('v');
+  it('serves blank rows without a source', () => {
+    const view = new BufferView('alternate', 4, 3);
+    expect(view.length).toBe(3);
+    expect(view.cursorX).toBe(0);
+    expect(view.viewportY).toBe(0);
+    expect(view.getLine(2)?.translateToString()).toBe('    ');
+    expect(view.getLine(2)?.getCell(1)?.getChars()).toBe('');
+    view.resize(5, 4);
+    expect(view.length).toBe(4);
+    expect(view.getLine(3)?.translateToString()).toBe('     ');
   });
 
-  it('switches normal and alternate buffers and emits only actual changes', () => {
+  it('switches screens and reads the normal screen while the alternate one is active', () => {
+    const normal = textSource(['n0', 'n1', 'n2'], 3);
+    const alternate = textSource(['a0', 'a1'], 2, 'alternate');
+    let screen: 'normal' | 'alternate' = 'normal';
+    const source = {
+      state: () => (screen === 'normal' ? normal : alternate).source.state(),
+      rows: (start: number, end: number) =>
+        (screen === 'normal' ? normal : alternate).source.rows(start, end),
+      normalState: () => normal.source.state(),
+      normalRows: (start: number, end: number) => normal.source.rows(start, end),
+    };
     const namespace = new BufferNamespace(4, 2);
     const changes = vi.fn();
     const subscription = namespace.onBufferChange(changes);
-    namespace.update(snapshotRows(['a', 'b'], 1), 4);
-    namespace.setAlternate(false);
-    expect(changes).not.toHaveBeenCalled();
+    const sync = (reset = false) =>
+      namespace.sync(source, { state: source.state(), trimmed: 0, reset, dirtyFrom: 0 });
 
-    namespace.update(snapshotRows(['x', 'y'], 2, 0, 2, 'alternate'), 4);
+    sync(true);
+    expect(changes).not.toHaveBeenCalled();
+    expect(namespace.active.getLine(2)?.translateToString(true)).toBe('n2');
+
+    screen = 'alternate';
+    sync(true);
     expect(namespace.active.type).toBe('alternate');
     expect(changes).toHaveBeenCalledOnce();
-    namespace.setAlternate(true);
-    expect(changes).toHaveBeenCalledOnce();
+    expect(namespace.active.getLine(0)?.translateToString(true)).toBe('a0');
+    expect(namespace.normal.length).toBe(3);
+    expect(namespace.normal.getLine(1)?.translateToString(true)).toBe('n1');
+
+    screen = 'normal';
+    sync();
+    expect(namespace.active.type).toBe('normal');
+    expect(changes).toHaveBeenCalledTimes(2);
+    expect(namespace.alternate.length).toBe(2);
+    expect(namespace.alternate.getLine(0)?.translateToString(true)).toBe('');
+    expect(namespace.cellAt(0, 0)).toBeUndefined();
     subscription.dispose();
     namespace.dispose();
   });
@@ -169,91 +187,68 @@ function styledCell(x: number, text: string, width: RenderCell['width']): Render
   };
 }
 
-function snapshot(cells: readonly RenderCell[]): TerminalBufferSnapshot {
+/** Packs cells the way core does, so the test exercises only the decoding. */
+function packedRow(cells: readonly RenderCell[]): PackedBufferRow {
+  const words = new Uint32Array(cells.length * 3);
+  for (const cell of cells) {
+    const packed = new BufferCell().load(cell) as unknown as {
+      content: number;
+      foreground: number;
+      background: number;
+    };
+    words.set([packed.content, packed.foreground, packed.background], cell.x * 3);
+  }
   return {
-    state: state(1, 1, 'normal'),
-    rows: [
-      {
-        index: 0,
-        id: 'row',
-        text: '😀 X',
-        cells,
-        wrapped: true,
-        wrapContinuation: true,
-        selection: null,
-      },
-    ],
+    index: 0,
+    cells: words,
+    strings: [],
+    hyperlinks: [],
+    wrapped: true,
+    wrapContinuation: true,
   };
 }
 
-function snapshotRows(
-  ids: readonly string[],
-  revision: number,
-  start = 0,
-  totalRows = ids.length,
-  screen: 'normal' | 'alternate' = 'normal'
-): TerminalBufferSnapshot {
-  return {
-    state: state(totalRows, revision, screen),
-    rows: ids.map((id, index) => ({
-      index: start + index,
-      id,
-      text: id,
-      cells: [plainCell(0, id)],
-      wrapped: false,
-      wrapContinuation: false,
-      selection: null,
-    })),
-  };
-}
-
-function semanticRows(
-  ids: readonly string[],
-  revision: number,
-  start: number,
+/** A screen whose rows read `row N` unless named, recording every range that is read. */
+function textSource(
+  names: readonly string[],
   totalRows: number,
-  operations: { readonly trimmed?: number; readonly appendStart: number; readonly reset?: boolean }
+  screen: 'normal' | 'alternate' = 'normal'
 ) {
-  return {
-    ...snapshotRows(ids, revision, start, totalRows),
-    trimmed: operations.trimmed ?? 0,
-    appendStart: operations.appendStart,
-    reset: operations.reset ?? false,
-  };
-}
-
-function state(totalRows: number, revision: number, screen: 'normal' | 'alternate') {
-  return {
-    screen,
-    totalRows,
-    scrollbackRows: Math.max(0, totalRows - 2),
-    viewportY: Math.max(0, totalRows - 2),
-    viewportLength: Math.min(2, totalRows),
-    cursorX: 0,
-    cursorY: Math.min(1, totalRows - 1),
-    revision,
-  };
-}
-
-function plainCell(x: number, text: string): RenderCell {
-  return {
-    x,
-    text,
-    width: 'narrow',
-    foreground: null,
-    background: null,
-    hyperlink: false,
-    semanticContent: 'output',
-    style: {
-      bold: false,
-      italic: false,
-      faint: false,
-      blink: false,
-      inverse: false,
-      invisible: false,
-      strikethrough: false,
-      overline: false,
-      underline: 0,
+  let first = 0;
+  const reads: Array<[number, number]> = [];
+  const result = {
+    reads,
+    stateReads: 0,
+    shift(count: number) {
+      first += count;
+    },
+    source: {
+      state: (): TerminalBufferState => {
+        result.stateReads += 1;
+        return {
+          screen,
+          totalRows,
+          scrollbackRows: Math.max(0, totalRows - 2),
+          viewportY: Math.max(0, totalRows - 2),
+          viewportLength: Math.min(2, totalRows),
+          cursorX: 0,
+          cursorY: 1,
+          revision: 1,
+        };
+      },
+      rows: (start: number, end: number): PackedBufferRow[] => {
+        reads.push([start, end]);
+        return Array.from({ length: end - start }, (_, offset) =>
+          textRow(start + offset, names[start + offset] ?? `row ${first + start + offset}`)
+        );
+      },
     },
   };
+  return result;
+}
+
+function textRow(index: number, text: string): PackedBufferRow {
+  const cells = new Uint32Array(text.length * 3);
+  for (let x = 0; x < text.length; x += 1) cells[x * 3] = (text.codePointAt(x) ?? 0) | (1 << 27);
+  return { index, cells, strings: [], hyperlinks: [], wrapped: false, wrapContinuation: false };
 }

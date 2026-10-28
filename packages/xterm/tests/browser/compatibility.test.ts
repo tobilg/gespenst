@@ -133,20 +133,18 @@ describe('xterm browser compatibility', () => {
 
     const native = await terminal.native;
     const key = Symbol.for('@gespenst/core/xterm-compatibility');
-    const bridge = (
+    const source = (
       native as unknown as Record<
         symbol,
-        {
-          writeAsync(data: Uint8Array, owned: boolean, boundaries: Uint32Array): Promise<unknown>;
-        }
+        { readonly buffer: { write(data: Uint8Array): void } | null } | undefined
       >
-    )[key];
-    if (!bridge) throw new Error('Core compatibility bridge is unavailable');
-    const original = bridge.writeAsync.bind(bridge);
+    )[key]?.buffer;
+    if (!source) throw new Error('Core buffer source is unavailable');
+    const original = source.write.bind(source);
     let writes = 0;
-    bridge.writeAsync = async (data, owned, boundaries) => {
+    source.write = (data) => {
       writes += 1;
-      return original(data, owned, boundaries);
+      original(data);
     };
 
     const first = new Promise<void>((resolve) => terminal.write(' a', resolve));

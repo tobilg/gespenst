@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/bashkit",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Single-process browser Bash addon for gespenst powered by BashKit",
   "keywords": [
     "terminal",
@@ -40,7 +40,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.2"
+    "@gespenst/core": "^0.2.0"
   },
   "dependencies": {
     "@everruns/bashkit-wasm": "0.17.1"

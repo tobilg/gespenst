@@ -82,6 +82,11 @@ message or WASM allocation. The default 30-second snapshot lifetime limits how l
 password can retrieve data. Each data request consumes the current snapshot, and a subsequent paste
 replaces any older one.
 
+Write requests from the running program have a lower ceiling. Ghostty accepts at most 8 MiB for one
+OSC sequence, and OSC 52 carries base64 data in a single sequence, so an OSC 52 write of 6 MiB or
+more is discarded while parsing. It never reaches Gespenst, and no `clipboardWrite` audit event is
+emitted. A `maxBytes` value above 6 MiB therefore only affects paste data from the browser.
+
 ## Performance notes
 
 - Data remains `Uint8Array`/`ArrayBuffer` across the browser API, worker boundary, and Ghostty ABI.

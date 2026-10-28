@@ -140,7 +140,6 @@ describe('TerminalWorkerHost', () => {
       type: 'write',
       data: new Uint8Array([3]).buffer,
       requestId: 13,
-      compatibilityBoundaries: new Uint32Array([1]).buffer,
     });
     await host.handle({
       terminalId: 3,
@@ -215,7 +214,6 @@ describe('TerminalWorkerHost', () => {
     value.events.get('error')?.(new Error('terminal failed'));
 
     expect(value.write).toHaveBeenCalled();
-    expect(value.xtermCompatibilityUpdate).toHaveBeenCalledOnce();
     expect(value.resize).toHaveBeenCalledWith(20, 4, 8, 20);
     expect(renderer.resize).toHaveBeenCalledWith(metrics);
     expect(renderer.setFocused).toHaveBeenCalledWith(true);
@@ -250,7 +248,6 @@ describe('TerminalWorkerHost', () => {
           parseMs: expect.any(Number),
           renderWaitMs: expect.any(Number),
           renderMs: expect.any(Number),
-          compatibilityMs: 0,
           backendMs: expect.any(Number),
         },
       })
@@ -259,18 +256,6 @@ describe('TerminalWorkerHost', () => {
       terminalId: 3,
       type: 'written',
       requestId: 13,
-      batch: {
-        updates: [
-          {
-            state,
-            dirty: frame.dirty,
-            trimmed: 0,
-            appendStart: state.totalRows,
-            reset: false,
-            rows: [],
-          },
-        ],
-      },
     });
 
     await host.handle({ terminalId: 3, type: 'dispose' });
@@ -438,15 +423,6 @@ function fakeTerminal() {
     restore: vi.fn(),
     setTheme: vi.fn(async () => undefined),
     render: vi.fn(() => frame),
-    xtermCompatibilityUpdate: vi.fn(() => ({
-      state,
-      dirty: frame.dirty,
-      trimmed: 0,
-      appendStart: state.totalRows,
-      reset: false,
-      rows: [],
-    })),
-    beginXtermCompatibilityBatch: vi.fn(),
     bufferState: vi.fn(() => state),
     dispose: vi.fn(),
     on: vi.fn((name: string, listener: (value: unknown) => void) => {

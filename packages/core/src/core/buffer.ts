@@ -3,6 +3,7 @@ import {
   type XtermCompatibilityRow,
   type XtermCompatibilityString,
 } from '../internal/xterm-compatibility.js';
+import { type CellBitFields, cellBitFields, cellCodepoint, packedBits } from './abi.js';
 import type { Allocation, GhosttyBindings } from './bindings.js';
 import type {
   CellColor,
@@ -31,6 +32,29 @@ const DEFAULT_STYLE: CellStyle = {
   overline: false,
   underline: 0,
 };
+
+interface CellStyling {
+  readonly style: CellStyle;
+  readonly foreground: RenderColor | null;
+  readonly background: RenderColor | null;
+  readonly foregroundSource: CellColor;
+  readonly backgroundSource: CellColor;
+  readonly underlineSource: CellColor;
+}
+
+const DEFAULT_COLOR: CellColor = { mode: 'default' };
+const DEFAULT_STYLING: CellStyling = {
+  style: DEFAULT_STYLE,
+  foreground: null,
+  background: null,
+  foregroundSource: DEFAULT_COLOR,
+  backgroundSource: DEFAULT_COLOR,
+  underlineSource: DEFAULT_COLOR,
+};
+
+// Indexed by the raw `GhosttyCellWide` and `GhosttyCellSemanticContent` values.
+const CELL_WIDTHS: readonly CellWidth[] = ['narrow', 'wide', 'spacer-tail', 'spacer-head'];
+const SEMANTIC_CONTENT: readonly SemanticContent[] = ['output', 'input', 'prompt'];
 
 const COMPATIBILITY_MODES = [
   [1, false],
@@ -70,9 +94,35 @@ export class BufferReader {
   private readonly modeSize: number;
   private readonly hyperlinkLength: Allocation;
   private hyperlinkBytes: Allocation;
+  private readonly cellBits: CellBitFields;
+  private readonly rowIdentityOffsets: Readonly<{
+    pointTag: number;
+    pointY: number;
+    screenTag: number;
+    node: number;
+    localY: number;
+    noValue: number;
+    success: number;
+    coordinateY: number;
+    x: number;
+  }>;
 
   constructor(bindings: GhosttyBindings) {
     this.bindings = bindings;
+    this.cellBits = cellBitFields(bindings.abi);
+    const abi = bindings.abi;
+    this.rowIdentityOffsets = {
+      pointTag: abi.field('GhosttyPoint', 'tag').offset,
+      pointY:
+        abi.field('GhosttyPoint', 'value').offset + abi.field('GhosttyPointCoordinate', 'y').offset,
+      screenTag: abi.value('GhosttyPointTag', 'SCREEN'),
+      node: abi.field('GhosttyGridRef', 'node').offset,
+      localY: abi.field('GhosttyGridRef', 'y').offset,
+      noValue: abi.value('GhosttyResult', 'NO_VALUE'),
+      success: abi.value('GhosttyResult', 'SUCCESS'),
+      coordinateY: abi.field('GhosttyPointCoordinate', 'y').offset,
+      x: abi.field('GhosttyGridRef', 'x').offset,
+    };
     this.scalar = bindings.alloc(8);
     this.point = bindings.allocType('GhosttyPoint');
     this.gridRef = bindings.allocType('GhosttyGridRef', true);
@@ -147,27 +197,58 @@ export class BufferReader {
     const start = clamp(Math.floor(requestedStart), 0, state.totalRows);
     const end = clamp(Math.floor(requestedEnd), start, state.totalRows);
     const rows: TerminalBufferRow[] = [];
+    // Style ids are local to a page and stable while the terminal is not written to.
+    const styles = new Map<number, CellStyling>();
     for (let index = start; index < end; index += 1) {
-      const row = this.readRow(terminal, index, theme);
+      const row = this.readRow(terminal, index, theme, styles);
       if (row) rows.push(row);
     }
     return { state, rows };
   }
 
-  /** Selects one retained row for the direct xterm reader and returns its stable identity. */
-  selectCompatibilityRow(terminal: number, index: number): number {
-    const identity = this.selectRowIdentity(terminal, index);
-    return identity ? identity.node * 65_536 + identity.localY : -1;
+  /**
+   * Points a tracked reference at a retained row, creating the reference when `tracked` is 0.
+   * Ghostty moves it as rows scroll or are pruned. Returns 0 when the row does not exist.
+   */
+  trackRow(terminal: number, index: number, tracked: number): number {
+    const offsets = this.rowIdentityOffsets;
+    let memory = this.bindings.memoryView;
+    new Uint8Array(memory.buffer, this.point.pointer, this.point.length).fill(0);
+    memory.setInt32(this.point.pointer + offsets.pointTag, offsets.screenTag, true);
+    memory.setUint32(this.point.pointer + offsets.pointY, index, true);
+    const exports = this.bindings.exports;
+    if (tracked !== 0) {
+      const result = exports.ghostty_tracked_grid_ref_set(tracked, terminal, this.point.pointer);
+      if (result === offsets.success) return tracked;
+      exports.ghostty_tracked_grid_ref_free(tracked);
+      return 0;
+    }
+    const result = exports.ghostty_terminal_grid_ref_track(
+      terminal,
+      this.point.pointer,
+      this.scalar.pointer
+    );
+    if (result !== offsets.success) return 0;
+    memory = this.bindings.memoryView;
+    return memory.getUint32(this.scalar.pointer, true);
   }
 
-  /** Resolves an OSC 8 URI on the row selected by {@link selectCompatibilityRow}. */
-  compatibilityHyperlinkUri(column: number): string | null {
-    this.gridRef.view.setUint16(
-      this.bindings.abi.field('GhosttyGridRef', 'x').offset,
-      column,
-      true
+  /** The current row index of a tracked reference, or -1 once Ghostty discarded its row. */
+  trackedRow(tracked: number): number {
+    if (tracked === 0) return -1;
+    const offsets = this.rowIdentityOffsets;
+    const result = this.bindings.exports.ghostty_tracked_grid_ref_point(
+      tracked,
+      offsets.screenTag,
+      this.scalar.pointer
     );
-    return this.readHyperlinkUri();
+    if (result !== offsets.success) return -1;
+    return this.bindings.memoryView.getUint32(this.scalar.pointer + offsets.coordinateY, true);
+  }
+
+  /** Frees a reference created by {@link trackRow}. */
+  releaseTrackedRow(tracked: number): void {
+    if (tracked !== 0) this.bindings.exports.ghostty_tracked_grid_ref_free(tracked);
   }
 
   /** Reads an explicit retained-buffer range directly into the xterm packed cell format. */
@@ -178,55 +259,56 @@ export class BufferReader {
   ): readonly XtermCompatibilityRow[] {
     const rows: XtermCompatibilityRow[] = [];
     const cols = this.getInt(terminal, 'COLS', 2);
+    const bits = this.cellBits;
+    // Style ids are local to a page and stable while the terminal is not written to.
+    const styles = new Map<number, readonly [number, number, number]>();
     for (let index = start; index < end; index += 1) {
-      if (this.selectCompatibilityRow(terminal, index) < 0) continue;
+      if (!this.selectRowIdentity(terminal, index)) continue;
       this.bindings.check(
         this.bindings.exports.ghostty_grid_ref_row(this.gridRef.pointer, this.row.pointer),
         `read xterm terminal row ${index}`
       );
       const rawRow = this.row.view.getBigUint64(0, true);
+      const styleScope = this.selectedNode() * 2 ** bits.styleId.width;
       const cells = new Uint32Array(cols * XTERM_CELL_WORDS);
       const strings: XtermCompatibilityString[] = [];
       const hyperlinks: XtermCompatibilityString[] = [];
       let retainedCells = 0;
       for (let x = 0; x < cols; x += 1) {
-        this.gridRef.view.setUint16(this.bindings.abi.field('GhosttyGridRef', 'x').offset, x, true);
-        this.bindings.check(
-          this.bindings.exports.ghostty_grid_ref_cell(this.gridRef.pointer, this.cell.pointer),
-          `read xterm terminal cell ${index}:${x}`
-        );
-        const cell = this.cell.view.getBigUint64(0, true);
-        const text = this.cellFlag(cell, 'HAS_TEXT') ? this.readGrapheme() : '';
+        const [low, high] = this.readCell(index, x);
+        const text = this.cellText(low, high);
         const firstCodepoint = text.codePointAt(0) ?? 0;
         const combined = text.length > (firstCodepoint > 0xffff ? 2 : firstCodepoint > 0 ? 1 : 0);
-        const width = this.compatibilityWidth(cell);
-        const styled = this.cellFlag(cell, 'HAS_STYLING');
+        // The raw wide value matches xterm's width encoding: narrow, wide, tail, head.
+        const width = packedBits(low, high, bits.wide);
+        const styleId = packedBits(low, high, bits.styleId);
         let underline = 0;
         let foreground = 0;
         let background = 0;
-        if (styled) {
-          this.style.bytes.fill(0);
-          this.style.view.setUint32(0, this.style.length, true);
-          this.bindings.check(
-            this.bindings.exports.ghostty_grid_ref_style(this.gridRef.pointer, this.style.pointer),
-            `read xterm terminal style ${index}:${x}`
-          );
-          const field = (name: string) => this.bindings.abi.field('GhosttyStyle', name).offset;
-          underline = this.style.view.getInt32(field('underline'), true);
-          foreground =
-            compatibilityColorWord(this.readStyleColorSource('fg_color')) |
-            (this.style.view.getUint8(field('bold')) !== 0 ? 1 << 26 : 0) |
-            (this.style.view.getUint8(field('italic')) !== 0 ? 1 << 27 : 0) |
-            (this.style.view.getUint8(field('faint')) !== 0 ? 1 << 28 : 0);
-          background =
-            compatibilityColorWord(this.readStyleColorSource('bg_color')) |
-            (this.style.view.getUint8(field('blink')) !== 0 ? 1 << 26 : 0) |
-            (this.style.view.getUint8(field('inverse')) !== 0 ? 1 << 27 : 0) |
-            (this.style.view.getUint8(field('invisible')) !== 0 ? 1 << 28 : 0) |
-            (this.style.view.getUint8(field('strikethrough')) !== 0 ? 1 << 29 : 0) |
-            (this.style.view.getUint8(field('overline')) !== 0 ? 1 << 30 : 0);
+        if (styleId !== 0) {
+          let words = styles.get(styleScope + styleId);
+          if (!words) {
+            this.readSelectedStyle(index, x);
+            const field = (name: string) => this.bindings.abi.field('GhosttyStyle', name).offset;
+            const view = this.style.view;
+            words = [
+              view.getInt32(field('underline'), true),
+              compatibilityColorWord(this.readStyleColorSource('fg_color')) |
+                (view.getUint8(field('bold')) !== 0 ? 1 << 26 : 0) |
+                (view.getUint8(field('italic')) !== 0 ? 1 << 27 : 0) |
+                (view.getUint8(field('faint')) !== 0 ? 1 << 28 : 0),
+              compatibilityColorWord(this.readStyleColorSource('bg_color')) |
+                (view.getUint8(field('blink')) !== 0 ? 1 << 26 : 0) |
+                (view.getUint8(field('inverse')) !== 0 ? 1 << 27 : 0) |
+                (view.getUint8(field('invisible')) !== 0 ? 1 << 28 : 0) |
+                (view.getUint8(field('strikethrough')) !== 0 ? 1 << 29 : 0) |
+                (view.getUint8(field('overline')) !== 0 ? 1 << 30 : 0),
+            ];
+            styles.set(styleScope + styleId, words);
+          }
+          [underline, foreground, background] = words;
         }
-        const hyperlink = this.cellFlag(cell, 'HAS_HYPERLINK');
+        const hyperlink = packedBits(low, high, bits.hyperlink) === 1;
         const offset = x * XTERM_CELL_WORDS;
         cells[offset] =
           ((combined ? lastCompatibilityCodepoint(text) : firstCodepoint) & 0x1fffff) |
@@ -290,7 +372,8 @@ export class BufferReader {
   private readRow(
     terminal: number,
     index: number,
-    theme: ResolvedTerminalTheme
+    theme: ResolvedTerminalTheme,
+    styles: Map<number, CellStyling>
   ): TerminalBufferRow | null {
     const bindings = this.bindings;
     const abi = bindings.abi;
@@ -324,49 +407,39 @@ export class BufferReader {
     const localY = this.gridRef.view.getUint16(abi.field('GhosttyGridRef', 'y').offset, true);
     const cells: RenderCell[] = [];
     const cols = this.getInt(terminal, 'COLS', 2);
+    const bits = this.cellBits;
+    const styleScope = node * 2 ** bits.styleId.width;
     for (let x = 0; x < cols; x += 1) {
-      this.gridRef.view.setUint16(abi.field('GhosttyGridRef', 'x').offset, x, true);
-      bindings.check(
-        bindings.exports.ghostty_grid_ref_cell(this.gridRef.pointer, this.cell.pointer),
-        `read terminal cell ${index}:${x}`
-      );
-      const cell = this.cell.view.getBigUint64(0, true);
-      const text = this.cellFlag(cell, 'HAS_TEXT') ? this.readGrapheme() : '';
-      const styled = this.cellFlag(cell, 'HAS_STYLING');
-      let style = DEFAULT_STYLE;
-      let foreground: RenderColor | null = null;
-      let background: RenderColor | null = null;
-      let foregroundSource: CellColor = { mode: 'default' };
-      let backgroundSource: CellColor = { mode: 'default' };
-      let underlineSource: CellColor = { mode: 'default' };
-      if (styled) {
-        this.style.bytes.fill(0);
-        this.style.view.setUint32(0, this.style.length, true);
-        bindings.check(
-          bindings.exports.ghostty_grid_ref_style(this.gridRef.pointer, this.style.pointer),
-          `read terminal cell style ${index}:${x}`
-        );
-        style = this.readStyle();
-        foregroundSource = this.readStyleColorSource('fg_color');
-        backgroundSource = this.readStyleColorSource('bg_color');
-        underlineSource = this.readStyleColorSource('underline_color');
-        foreground = resolveStyleColor(foregroundSource, theme);
-        background = resolveStyleColor(backgroundSource, theme);
+      const [low, high] = this.readCell(index, x);
+      const styleId = packedBits(low, high, bits.styleId);
+      let styling = DEFAULT_STYLING;
+      if (styleId !== 0) {
+        const cached = styles.get(styleScope + styleId);
+        if (cached) styling = cached;
+        else {
+          this.readSelectedStyle(index, x);
+          const foregroundSource = this.readStyleColorSource('fg_color');
+          const backgroundSource = this.readStyleColorSource('bg_color');
+          styling = {
+            style: this.readStyle(),
+            foreground: resolveStyleColor(foregroundSource, theme),
+            background: resolveStyleColor(backgroundSource, theme),
+            foregroundSource,
+            backgroundSource,
+            underlineSource: this.readStyleColorSource('underline_color'),
+          };
+          styles.set(styleScope + styleId, styling);
+        }
       }
-      const hyperlink = this.cellFlag(cell, 'HAS_HYPERLINK');
+      const hyperlink = packedBits(low, high, bits.hyperlink) === 1;
       cells.push({
         x,
-        text,
-        width: this.cellWidth(cell),
-        style,
-        foreground,
-        background,
-        foregroundSource,
-        backgroundSource,
-        underlineSource,
+        text: this.cellText(low, high),
+        width: CELL_WIDTHS[packedBits(low, high, bits.wide)] ?? 'narrow',
+        ...styling,
         hyperlink,
         hyperlinkUri: hyperlink ? this.readHyperlinkUri() : null,
-        semanticContent: this.semanticContent(cell),
+        semanticContent: SEMANTIC_CONTENT[packedBits(low, high, bits.semanticContent)] ?? 'unknown',
       });
     }
     return {
@@ -380,34 +453,66 @@ export class BufferReader {
     };
   }
 
+  /** Reads the raw cell at column `x` of the selected row as its low and high 32-bit words. */
+  private readCell(index: number, x: number): readonly [low: number, high: number] {
+    this.bindings.memoryView.setUint16(this.gridRef.pointer + this.rowIdentityOffsets.x, x, true);
+    this.bindings.check(
+      this.bindings.exports.ghostty_grid_ref_cell(this.gridRef.pointer, this.cell.pointer),
+      `read terminal cell ${index}:${x}`
+    );
+    const view = this.bindings.memoryView;
+    return [view.getUint32(this.cell.pointer, true), view.getUint32(this.cell.pointer + 4, true)];
+  }
+
+  /** Decodes a raw cell's text; only multi-codepoint graphemes need another WASM call. */
+  private cellText(low: number, high: number): string {
+    const bits = this.cellBits;
+    const tag = packedBits(low, high, bits.contentTag);
+    if (tag !== bits.tagCodepoint && tag !== bits.tagGrapheme) return '';
+    const codepoint = cellCodepoint(low, high, bits);
+    if (codepoint === 0) return '';
+    return tag === bits.tagGrapheme ? this.readGrapheme() : String.fromCodePoint(codepoint);
+  }
+
+  /** Reads the style of the cell selected by {@link readCell} into the style buffer. */
+  private readSelectedStyle(index: number, x: number): void {
+    this.style.bytes.fill(0);
+    this.style.view.setUint32(0, this.style.length, true);
+    this.bindings.check(
+      this.bindings.exports.ghostty_grid_ref_style(this.gridRef.pointer, this.style.pointer),
+      `read terminal cell style ${index}:${x}`
+    );
+  }
+
+  /** Page node of the row last selected by {@link selectRowIdentity}. */
+  private selectedNode(): number {
+    return this.gridRef.view.getUint32(
+      this.bindings.abi.field('GhosttyGridRef', 'node').offset,
+      true
+    );
+  }
+
   private selectRowIdentity(
     terminal: number,
     index: number
   ): { readonly node: number; readonly localY: number } | null {
-    const abi = this.bindings.abi;
-    const pointValue = abi.field('GhosttyPoint', 'value').offset;
-    this.point.bytes.fill(0);
-    this.point.view.setInt32(
-      abi.field('GhosttyPoint', 'tag').offset,
-      abi.value('GhosttyPointTag', 'SCREEN'),
-      true
-    );
-    this.point.view.setUint32(
-      pointValue + abi.field('GhosttyPointCoordinate', 'y').offset,
-      index,
-      true
-    );
-    this.gridRef.bytes.fill(0);
-    this.gridRef.view.setUint32(0, this.gridRef.length, true);
+    const offsets = this.rowIdentityOffsets;
+    let memory = this.bindings.memoryView;
+    new Uint8Array(memory.buffer, this.point.pointer, this.point.length).fill(0);
+    memory.setInt32(this.point.pointer + offsets.pointTag, offsets.screenTag, true);
+    memory.setUint32(this.point.pointer + offsets.pointY, index, true);
+    new Uint8Array(memory.buffer, this.gridRef.pointer, this.gridRef.length).fill(0);
+    memory.setUint32(this.gridRef.pointer, this.gridRef.length, true);
     const result = this.bindings.exports.ghostty_terminal_grid_ref(
       terminal,
       this.point.pointer,
       this.gridRef.pointer
     );
-    if (result === abi.value('GhosttyResult', 'NO_VALUE')) return null;
+    if (result === offsets.noValue) return null;
     this.bindings.check(result, `read terminal buffer row identity ${index}`);
-    const node = this.gridRef.view.getUint32(abi.field('GhosttyGridRef', 'node').offset, true);
-    const localY = this.gridRef.view.getUint16(abi.field('GhosttyGridRef', 'y').offset, true);
+    memory = this.bindings.memoryView;
+    const node = memory.getUint32(this.gridRef.pointer + offsets.node, true);
+    const localY = memory.getUint16(this.gridRef.pointer + offsets.localY, true);
     return { node, localY };
   }
 
@@ -421,30 +526,6 @@ export class BufferReader {
       `read terminal ${name.toLowerCase()}`
     );
     return size === 2 ? this.scalar.view.getUint16(0, true) : this.scalar.view.getInt32(0, true);
-  }
-
-  private cellFlag(cell: bigint, name: string): boolean {
-    this.bindings.check(
-      this.bindings.exports.ghostty_cell_get(
-        cell,
-        this.bindings.abi.value('GhosttyCellData', name),
-        this.scalar.pointer
-      ),
-      `read cell ${name.toLowerCase()}`
-    );
-    return this.scalar.view.getUint8(0) !== 0;
-  }
-
-  private cellValue(cell: bigint, name: string): number {
-    this.bindings.check(
-      this.bindings.exports.ghostty_cell_get(
-        cell,
-        this.bindings.abi.value('GhosttyCellData', name),
-        this.scalar.pointer
-      ),
-      `read cell ${name.toLowerCase()}`
-    );
-    return this.scalar.view.getInt32(0, true);
   }
 
   private rowFlag(row: bigint, name: string): boolean {
@@ -482,33 +563,6 @@ export class BufferReader {
       this.graphemes.free();
       this.graphemes = this.bindings.alloc(Math.max(length * 4, 32));
     }
-  }
-
-  private cellWidth(cell: bigint): CellWidth {
-    const value = this.cellValue(cell, 'WIDE');
-    const abi = this.bindings.abi;
-    if (value === abi.value('GhosttyCellWide', 'WIDE')) return 'wide';
-    if (value === abi.value('GhosttyCellWide', 'SPACER_TAIL')) return 'spacer-tail';
-    if (value === abi.value('GhosttyCellWide', 'SPACER_HEAD')) return 'spacer-head';
-    return 'narrow';
-  }
-
-  private compatibilityWidth(cell: bigint): number {
-    const value = this.cellValue(cell, 'WIDE');
-    const abi = this.bindings.abi;
-    if (value === abi.value('GhosttyCellWide', 'WIDE')) return 1;
-    if (value === abi.value('GhosttyCellWide', 'SPACER_TAIL')) return 2;
-    if (value === abi.value('GhosttyCellWide', 'SPACER_HEAD')) return 3;
-    return 0;
-  }
-
-  private semanticContent(cell: bigint): SemanticContent {
-    const value = this.cellValue(cell, 'SEMANTIC_CONTENT');
-    const abi = this.bindings.abi;
-    if (value === abi.value('GhosttyCellSemanticContent', 'OUTPUT')) return 'output';
-    if (value === abi.value('GhosttyCellSemanticContent', 'INPUT')) return 'input';
-    if (value === abi.value('GhosttyCellSemanticContent', 'PROMPT')) return 'prompt';
-    return 'unknown';
   }
 
   private readStyle(): CellStyle {

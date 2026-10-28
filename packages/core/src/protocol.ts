@@ -13,12 +13,11 @@ import type {
   WasmSource,
 } from './core/types.js';
 import type { CoreBenchmarkTiming } from './internal/benchmark.js';
-import type { XtermCompatibilityBatch } from './internal/xterm-compatibility.js';
 import type { RendererInfo, RendererPreference, RenderMetrics } from './renderers/hybrid.js';
 import type { TerminalFontFace } from './types.js';
 
 /** Version of the internal main-thread/worker message protocol. */
-export const TERMINAL_PROTOCOL_VERSION = 11 as const;
+export const TERMINAL_PROTOCOL_VERSION = 12 as const;
 
 type WorkerWasmSource = Exclude<WasmSource, Response | URL>;
 
@@ -48,13 +47,11 @@ export interface WorkerInitOptions extends CoreTerminalOptions {
 }
 
 export type MainToWorkerPayload =
-  | { readonly type: 'init'; readonly version: 11; readonly options: WorkerInitOptions }
+  | { readonly type: 'init'; readonly version: 12; readonly options: WorkerInitOptions }
   | {
       readonly type: 'write';
       readonly data: ArrayBuffer;
       readonly requestId?: number;
-      /** End offsets for the xterm compatibility fragments contained in `data`. */
-      readonly compatibilityBoundaries?: ArrayBuffer;
       readonly benchmark?: boolean;
     }
   | {
@@ -138,7 +135,6 @@ export type WorkerToMainPayload =
   | {
       readonly type: 'written';
       readonly requestId: number;
-      readonly batch?: XtermCompatibilityBatch;
       readonly timing?: CoreBenchmarkTiming;
     }
   | { readonly type: 'restored'; readonly requestId: number }

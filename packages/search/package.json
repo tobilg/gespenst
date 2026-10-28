@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/search",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Paged full-scrollback search and canvas highlights for gespenst",
   "keywords": [
     "terminal",
@@ -37,7 +37,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.2"
+    "@gespenst/core": "^0.2.0"
   },
   "devDependencies": {
     "@gespenst/core": "workspace:*"

@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/shell",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Portable browser Bash facade for gespenst powered by BashKit",
   "keywords": [
     "terminal",
@@ -39,7 +39,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.2"
+    "@gespenst/core": "^0.2.0"
   },
   "dependencies": {
     "@gespenst/bashkit": "workspace:*"

@@ -36,9 +36,9 @@ import type {
 } from '@xterm/xterm';
 import {
   BufferCell,
+  type BufferChanges,
   BufferNamespace,
-  type PackedBufferRow,
-  type PackedBufferSnapshot,
+  type BufferNamespaceSource,
 } from './buffer';
 import { EventEmitter } from './events';
 import { ParserApi } from './parser';
@@ -46,10 +46,14 @@ import './style.css';
 
 export type * from '@xterm/xterm';
 
-/** Gespenst runtime and renderer controls layered on top of xterm.js constructor options. */
+/**
+ * Gespenst runtime and renderer controls layered on top of xterm.js constructor options.
+ *
+ * @remarks
+ * xterm-compatible terminals run Ghostty on the main thread, like xterm.js, so `buffer` reads rows
+ * synchronously. Terminals created with the same WASM sources share one runtime.
+ */
 export interface GespenstXtermRuntimeOptions {
-  /** Core execution policy. Dedicated workers remain the default when supported. */
-  readonly worker?: false | 'dedicated' | 'shared';
   /** Preferred native renderer and its built-in fallback ladder. */
   readonly renderer?: RendererPreference;
   /** Precompiled module, URL, or bytes for the Ghostty VT runtime. */
@@ -92,46 +96,18 @@ const WRITE_QUEUE_WATERMARK = 50 * 1024 * 1024;
 const WRITE_BATCH_BYTES = 1024 * 1024;
 const WRITE_SLICE_MS = 8;
 
-interface CoreCompatibilityRow extends PackedBufferRow {}
-
-interface CoreCompatibilityUpdate {
-  readonly state: TerminalBufferState;
-  readonly dirty: 'clean' | 'partial' | 'full';
-  readonly trimmed: number;
-  readonly appendStart: number;
-  readonly reset: boolean;
-  readonly rows: readonly CoreCompatibilityRow[];
-}
-
-interface CoreCompatibilityBatch {
-  readonly updates: readonly CoreCompatibilityUpdate[];
+interface CoreBufferSource extends BufferNamespaceSource {
+  write(data: Uint8Array): void;
+  changes(): BufferChanges;
+  onChange(listener: () => void): { readonly dispose: () => void };
 }
 
 interface CoreCompatibilityBridge {
-  onInput?(listener: (data: string | Uint8Array, source: string) => void): {
+  onInput(listener: (data: string | Uint8Array, source: string) => void): {
     readonly dispose: () => void;
   };
-  writeAsync(
-    data: Uint8Array,
-    owned: boolean,
-    boundaries: Uint32Array
-  ): Promise<CoreCompatibilityBatch>;
-  writeMeasured?(
-    data: Uint8Array,
-    owned: boolean,
-    boundaries: Uint32Array
-  ): Promise<{
-    readonly batch: CoreCompatibilityBatch;
-    readonly timing: CoreBenchmarkTiming;
-  }>;
-}
-
-interface CoreBenchmarkTiming {
-  readonly parseMs: number;
-  readonly renderWaitMs: number;
-  readonly renderMs: number;
-  readonly compatibilityMs: number;
-  readonly backendMs: number;
+  readonly buffer: CoreBufferSource | null;
+  open(container: HTMLElement): Promise<void>;
 }
 
 interface XtermBenchmarkTiming {
@@ -140,7 +116,6 @@ interface XtermBenchmarkTiming {
   readonly bufferSyncMs: number;
   readonly callbackMs: number;
   readonly totalMs: number;
-  readonly core?: CoreBenchmarkTiming;
 }
 
 interface XtermBenchmarkMeasurement {
@@ -484,8 +459,10 @@ export class Terminal {
   private writeFlushScheduled = false;
   private pendingWriteBytes = 0;
   private didUserInput = false;
-  private compatibilityWritesPending = 0;
-  private mountingNative = false;
+  /** Ghostty's rows, read synchronously once the native terminal is ready. */
+  private bufferSource: CoreBufferSource | null = null;
+  /** Last viewport position reported through `onScroll`; xterm.js starts at row 0 silently. */
+  private scrollPosition = 0;
   private writeParsedQueued = false;
   private pendingRenderRange: XtermRenderEvent | null = null;
   private lastCursor = '0:0';
@@ -495,7 +472,6 @@ export class Terminal {
   private readonly decoder = new TextDecoder();
   private readonly encoder = new TextEncoder();
   private convertEolPreviousWasCarriageReturn = false;
-  private viewportSyncPromise: Promise<void> | null = null;
   private readonly bufferValue: BufferNamespace;
   private readonly parserValue = new ParserApi();
   private readonly markersValue: Marker[] = [];
@@ -567,6 +543,14 @@ export class Terminal {
     this.colsValue = normalizeDimension(options.cols, 80, 2);
     this.rowsValue = normalizeDimension(options.rows, 24, 1);
     const { cols: _cols, rows: _rows, gespenst = {}, ...runtimeOptions } = options;
+    const worker = (gespenst as { readonly worker?: unknown }).worker;
+    if (worker !== undefined && worker !== false) {
+      throw new XtermCompatibilityError(
+        'gespenst.worker',
+        'xterm-compatible terminals run Ghostty on the main thread so that `buffer` reads rows ' +
+          'synchronously; remove `gespenst.worker`, or use the native @gespenst/core API for a worker'
+      );
+    }
     this.gespenstOptions = gespenst;
     this.optionValues = { ...DEFAULT_OPTIONS };
     this.optionValues = applyValidatedOptions(this.optionValues, runtimeOptions, true);
@@ -575,11 +559,7 @@ export class Terminal {
       () => this.optionValues,
       (property, value) => this.applyOptions({ [property]: value } as ITerminalOptions)
     );
-    this.bufferValue = new BufferNamespace(
-      this.colsValue,
-      this.rowsValue,
-      this.optionValues.scrollback ?? 1000
-    );
+    this.bufferValue = new BufferNamespace(this.colsValue, this.rowsValue);
     this.buffer = this.bufferValue;
     this.parser = this.parserValue;
     this.unicode = new UnicodeHandling(() => this.requireProposed('unicode'));
@@ -720,23 +700,17 @@ export class Terminal {
     void this.native
       .then(async (native) => {
         if (this.disposed) return;
-        const cols = this.colsValue;
-        const rows = this.rowsValue;
-        this.mountingNative = true;
-        try {
-          await native.open(screen);
-          // Core `open()` fits its host by design, while xterm.js preserves the configured grid
-          // until the caller or FitAddon explicitly resizes it.
-          native.resize(cols, rows);
-        } finally {
-          this.mountingNative = false;
-        }
+        // Core `open()` fits its host by design, while xterm.js preserves the configured grid
+        // until the caller or FitAddon explicitly resizes it.
+        const bridge = coreCompatibilityBridge(native);
+        if (bridge) await bridge.open(screen);
+        if (this.disposed) return;
         this.textareaValue = native.element.querySelector('textarea') ?? undefined;
         this.textareaValue?.classList.add('xterm-helper-textarea');
         if (this.textareaValue)
           this.textareaValue.readOnly = this.optionValues.disableStdin ?? false;
         this.applyTextareaStrings();
-        await this.syncViewport();
+        this.syncFromSource();
       })
       .catch((error: unknown) => {
         if (!this.disposed) this.logError(error);
@@ -917,10 +891,9 @@ export class Terminal {
   /** Scrolls to an absolute zero-based buffer row. */
   scrollToLine(line: number): void {
     verifyIntegers(line);
-    this.queueNative((native) => {
-      native.scrollToTop();
-      native.scrollLines(Math.max(0, line));
-    });
+    this.queueNative((native) =>
+      native.scrollLines(Math.max(0, line) - this.buffer.active.viewportY)
+    );
   }
 
   /** Clears scrollback and moves the current cursor row to the top, matching xterm.js. */
@@ -1022,16 +995,13 @@ export class Terminal {
     this.refresh(0, this.rowsValue - 1);
   }
 
-  /** Resets VT state, sidecar modes, and buffer tracking. */
+  /** Resets VT state, mirrored modes, and buffer tracking. */
   reset(): void {
     this.modeValues = { ...INITIAL_MODES };
     this.convertEolPreviousWasCarriageReturn = false;
     this.bufferValue.setAlternate(false);
     for (const marker of [...this.markersValue]) marker.dispose();
-    this.queueNative((native) => {
-      native.reset();
-      this.queueViewportSync();
-    });
+    this.queueNative((native) => native.reset());
   }
 
   /** Activates an xterm.js addon and owns it until terminal disposal. */
@@ -1089,7 +1059,7 @@ export class Terminal {
       minimumContrastRatio: this.optionValues.minimumContrastRatio ?? 1,
       defaultCursorStyle: this.optionValues.cursorStyle ?? 'block',
       defaultCursorBlink: this.optionValues.cursorBlink ?? false,
-      ...(this.gespenstOptions.worker === undefined ? {} : { worker: this.gespenstOptions.worker }),
+      worker: false,
       ...(this.gespenstOptions.renderer === undefined
         ? {}
         : { renderer: this.gespenstOptions.renderer }),
@@ -1128,121 +1098,53 @@ export class Terminal {
       this.pendingWriteHead = 0;
     }
     if (entries.length === 0 || this.disposed) return;
-    const native = await this.native;
-    if (this.disposed) return;
-    const bridge = coreCompatibilityBridge(native);
-    const chunks: Array<{ readonly data: Uint8Array; readonly owned: boolean }> = [];
+    await this.ready;
+    const source = this.bufferSource;
+    if (!source || this.disposed) return;
+    const chunks: Uint8Array[] = [];
     let sliceStarted = performance.now();
-    const flushChunks = async (): Promise<void> => {
+    // Ghostty parses synchronously; the frame that paints the output follows on the next frame.
+    const flushChunks = (): void => {
       if (chunks.length === 0) return;
       let output: Uint8Array;
-      let owned: boolean;
-      if (chunks.length === 1) {
-        const chunk = chunks.shift();
-        if (!chunk) return;
-        output = chunk.data;
-        owned = chunk.owned;
-      } else {
-        const length = chunks.reduce((total, chunk) => total + chunk.data.byteLength, 0);
-        output = new Uint8Array(length);
+      if (chunks.length === 1) output = chunks[0] as Uint8Array;
+      else {
+        output = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0));
         let offset = 0;
-        for (const chunk of chunks.splice(0)) {
-          output.set(chunk.data, offset);
-          offset += chunk.data.byteLength;
+        for (const chunk of chunks) {
+          output.set(chunk, offset);
+          offset += chunk.byteLength;
         }
-        owned = true;
       }
-      if (bridge) {
-        this.compatibilityWritesPending += 1;
-        try {
-          const batch = await bridge.writeAsync(
-            output,
-            owned,
-            this.compatibilityBoundaries(output)
-          );
-          await this.applyCompatibilityBatch(batch);
-        } finally {
-          this.compatibilityWritesPending -= 1;
-        }
-      } else {
-        await native.writeAsync(output);
-        await this.syncViewport();
-      }
+      chunks.length = 0;
+      source.write(output);
     };
     for (const entry of entries) {
       if (entry.kind === 'clear') {
-        await flushChunks();
-        await this.syncViewport();
+        flushChunks();
         const buffer = this.buffer.active;
         const cursorX = buffer.cursorX;
         const cursorY = buffer.cursorY;
         const scroll = cursorY > 0 ? `\x1b[${cursorY}S` : '';
         const clearBelow = this.rowsValue > 1 ? '\x1b[2;1H\x1b[0J' : '';
-        await native.writeAsync(`${scroll}${clearBelow}\x1b[1;${cursorX + 1}H\x1b[3J`);
-        await this.syncViewport();
+        source.write(this.encoder.encode(`${scroll}${clearBelow}\x1b[1;${cursorX + 1}H\x1b[3J`));
         continue;
       }
       if (entry.measurement) {
-        await flushChunks();
+        flushChunks();
         const measurement = entry.measurement;
         const adapterStartedAt = performance.now();
         try {
-          const normalized = this.normalizeWrite(entry.data);
-          const filtered = this.parserValue.active
-            ? await this.parserValue.process(normalized)
-            : normalized;
-          this.emitLineFeeds(filtered);
-          const bytes = typeof filtered === 'string' ? this.encoder.encode(filtered) : filtered;
-          const adapterMs = performance.now() - adapterStartedAt;
-          let core: CoreBenchmarkTiming | undefined;
-          let bufferSyncMs = 0;
-          if (bytes.byteLength > 0 && bridge?.writeMeasured) {
-            this.compatibilityWritesPending += 1;
-            try {
-              const syncStartedAt = performance.now();
-              const result = await bridge.writeMeasured(
-                bytes,
-                typeof filtered === 'string' || filtered !== entry.data,
-                this.compatibilityBoundaries(bytes)
-              );
-              await this.applyCompatibilityBatch(result.batch);
-              core = result.timing;
-              bufferSyncMs = performance.now() - syncStartedAt;
-            } finally {
-              this.compatibilityWritesPending -= 1;
-            }
-          } else if (bytes.byteLength > 0) {
-            if (bridge) {
-              const syncStartedAt = performance.now();
-              const batch = await bridge.writeAsync(
-                bytes,
-                typeof filtered === 'string' || filtered !== entry.data,
-                this.compatibilityBoundaries(bytes)
-              );
-              await this.applyCompatibilityBatch(batch);
-              bufferSyncMs = performance.now() - syncStartedAt;
-            } else {
-              await native.writeAsync(bytes);
-              const syncStartedAt = performance.now();
-              await this.syncViewport();
-              bufferSyncMs = performance.now() - syncStartedAt;
-            }
-          }
+          const bytes = await this.filterWrite(entry.data);
+          const syncStartedAt = performance.now();
+          if (bytes.byteLength > 0) source.write(bytes);
           const callbackStartedAt = performance.now();
-          const result: {
-            queueMs: number;
-            adapterMs: number;
-            bufferSyncMs: number;
-            callbackMs: number;
-            totalMs: number;
-            core?: CoreBenchmarkTiming;
-          } = {
+          const result = {
             queueMs: adapterStartedAt - measurement.queuedAt,
-            adapterMs,
-            bufferSyncMs,
+            adapterMs: syncStartedAt - adapterStartedAt,
+            bufferSyncMs: callbackStartedAt - syncStartedAt,
             callbackMs: 0,
             totalMs: callbackStartedAt - measurement.queuedAt,
-            ...(core ? { core } : {}),
           };
           measurement.resolve(result);
           result.callbackMs = performance.now() - callbackStartedAt;
@@ -1251,48 +1153,20 @@ export class Terminal {
         }
         continue;
       }
-      const normalized = this.normalizeWrite(entry.data);
-      const filtered = this.parserValue.active
-        ? await this.parserValue.process(normalized)
-        : normalized;
-      this.emitLineFeeds(filtered);
-      const bytes = typeof filtered === 'string' ? this.encoder.encode(filtered) : filtered;
-      if (bytes.byteLength > 0)
-        chunks.push({
-          data: bytes,
-          owned: typeof filtered === 'string' || filtered !== entry.data,
-        });
+      const bytes = await this.filterWrite(entry.data);
+      if (bytes.byteLength > 0) chunks.push(bytes);
       if (
         (this.parserValue.active || this.lineFeedEvent.hasListeners) &&
         performance.now() - sliceStarted >= WRITE_SLICE_MS
       ) {
-        await flushChunks();
+        flushChunks();
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        if (this.disposed) return;
         sliceStarted = performance.now();
       }
     }
-    await flushChunks();
+    flushChunks();
     for (const entry of entries) if (entry.kind === 'write') entry.callback?.();
-  }
-
-  private compatibilityBoundaries(data: Uint8Array): Uint32Array {
-    if ((this.optionValues.scrollback ?? 1000) === 0 || this.rowsValue <= 1) {
-      return new Uint32Array([data.byteLength]);
-    }
-    const maximumLineFeeds = Math.max(1, this.rowsValue - 1);
-    const maximumBytes = Math.max(1, this.colsValue * maximumLineFeeds);
-    const boundaries: number[] = [];
-    let start = 0;
-    let lineFeeds = 0;
-    for (let index = 0; index < data.byteLength; index += 1) {
-      if (data[index] === 0x0a) lineFeeds += 1;
-      if (lineFeeds < maximumLineFeeds && index + 1 - start < maximumBytes) continue;
-      boundaries.push(index + 1);
-      start = index + 1;
-      lineFeeds = 0;
-    }
-    if (start < data.byteLength || boundaries.length === 0) boundaries.push(data.byteLength);
-    return Uint32Array.from(boundaries);
   }
 
   private startNative(): void {
@@ -1303,32 +1177,36 @@ export class Terminal {
 
   private bindNative(native: GespenstTerminal): void {
     const bridge = coreCompatibilityBridge(native);
-    const input = bridge?.onInput
-      ? bridge.onInput((data, source) => this.handleNativeInput(data, source))
-      : native.on('input', ({ data, source }) => this.handleNativeInput(data, source));
+    const source = bridge?.buffer;
+    if (!bridge || !source) {
+      throw new XtermCompatibilityError(
+        'runtime',
+        '@gespenst/xterm requires the version-matched @gespenst/core running on the main thread'
+      );
+    }
+    this.bufferSource = source;
     this.disposables.push(
-      input,
+      bridge.onInput((data, inputSource) => this.handleNativeInput(data, inputSource)),
+      source.onChange(() => this.syncFromSource()),
       native.on('bell', () => this.bellEvent.fire(undefined)),
       native.on('title', (title) => this.titleEvent.fire(title)),
-      native.on('scroll', (position) => {
-        this.scrollEvent.fire(position);
-        if (this.compatibilityWritesPending === 0) this.queueViewportSync();
-      }),
       native.on('selectionChange', () => this.refreshSelection(true)),
       native.on('viewportChange', () => {
+        // xterm.js reports rows when they are painted.
         const range = this.pendingRenderRange;
         this.pendingRenderRange = null;
         if (range && this.renderEvent.hasListeners) this.renderEvent.fire(range);
       }),
       native.on('resize', ({ cols, rows }) => {
-        if (this.mountingNative) return;
         this.colsValue = cols;
         this.rowsValue = rows;
+        this.bufferValue.resize(cols, rows);
         this.resizeEvent.fire({ cols, rows });
-        this.queueViewportSync();
+        this.syncFromSource();
       }),
-      native.on('font', () => this.queueViewportSync())
+      native.on('font', () => this.syncFromSource())
     );
+    this.syncFromSource();
   }
 
   private handleNativeInput(data: string | Uint8Array, source: string): void {
@@ -1369,10 +1247,11 @@ export class Terminal {
       true
     );
     this.viewportValue?.addEventListener('scroll', () => {
-      if (this.syncingScrollbar) return;
+      if (this.syncingScrollbar || this.disposed) return;
       const metrics = this.cssCellMetrics();
       if (metrics.cellHeightPx <= 0) return;
-      this.scrollToLine(Math.round((this.viewportValue?.scrollTop ?? 0) / metrics.cellHeightPx));
+      const line = Math.round((this.viewportValue?.scrollTop ?? 0) / metrics.cellHeightPx);
+      if (line !== this.buffer.active.viewportY) this.scrollToLine(line);
     });
     element.addEventListener(
       'keyup',
@@ -1407,83 +1286,27 @@ export class Terminal {
     });
   }
 
-  private syncViewport(): Promise<void> {
-    if (this.viewportSyncPromise) return this.viewportSyncPromise;
-    const sync = this.performViewportSync();
-    this.viewportSyncPromise = sync;
-    const clear = () => {
-      if (this.viewportSyncPromise === sync) this.viewportSyncPromise = null;
-    };
-    void sync.then(clear, clear);
-    return sync;
-  }
-
-  private async performViewportSync(): Promise<void> {
-    if (this.disposed) return;
-    const native = this.nativeValue;
-    if (!native) return;
-    let snapshot = await native.readBuffer();
-    if (this.disposed) return;
+  /** Brings the buffer views, markers, and viewport-derived state up to date with Ghostty. */
+  private syncFromSource(): void {
+    const source = this.bufferSource;
+    if (!source || this.disposed) return;
+    const previous = this.buffer.active;
+    const previousType = previous.type;
+    const previousViewportY = previous.viewportY;
+    const changes = source.changes();
     if (this.activeLink || this.linkDecorations.length > 0) this.clearActiveLink();
-    let update = this.bufferValue.update(snapshot, this.colsValue);
-    this.reconcileMarkers(update.trimmed, update.identityReset);
-    if (update.missing) {
-      snapshot = await native.readBuffer(update.missing);
-      if (this.disposed) return;
-      update = this.bufferValue.update(snapshot, this.colsValue);
-      this.reconcileMarkers(update.trimmed, update.identityReset);
+    this.bufferValue.sync(source, changes);
+    const { state } = changes;
+    if (state.screen === 'normal') this.reconcileMarkers(changes.trimmed, changes.reset);
+    const lastRow = Math.max(0, this.rowsValue - 1);
+    let renderRange: XtermRenderEvent | null = null;
+    if (changes.reset || state.screen !== previousType || state.viewportY !== previousViewportY)
+      renderRange = { start: 0, end: lastRow };
+    else {
+      const start = Math.max(0, changes.dirtyFrom - state.viewportY);
+      if (start <= lastRow) renderRange = { start, end: lastRow };
     }
-    this.finalizeViewportUpdate(snapshot.state, { start: 0, end: Math.max(0, this.rowsValue - 1) });
-  }
-
-  private async applyCompatibilityBatch(batch: CoreCompatibilityBatch): Promise<void> {
-    if (this.disposed) return;
-    const native = this.nativeValue;
-    if (!native) return;
-    if (this.activeLink || this.linkDecorations.length > 0) this.clearActiveLink();
-    let finalState: TerminalBufferState | null = null;
-    let range: XtermRenderEvent | null = null;
-    let normalTrimmed = 0;
-    let normalReset = false;
-    for (const update of batch.updates) {
-      let bufferUpdate = this.bufferValue.update(
-        {
-          state: update.state,
-          rows: update.rows,
-          trimmed: update.trimmed,
-          appendStart: update.appendStart,
-          reset: update.reset,
-        } satisfies PackedBufferSnapshot,
-        this.colsValue
-      );
-      let state = update.state;
-      if (state.screen === 'normal') {
-        normalTrimmed += bufferUpdate.trimmed;
-        normalReset ||= bufferUpdate.identityReset;
-      }
-      if (bufferUpdate.missing) {
-        const snapshot = await native.readBuffer(bufferUpdate.missing);
-        if (this.disposed) return;
-        bufferUpdate = this.bufferValue.update(snapshot, this.colsValue);
-        if (snapshot.state.screen === 'normal') {
-          normalTrimmed += bufferUpdate.trimmed;
-          normalReset ||= bufferUpdate.identityReset;
-        }
-        state = snapshot.state;
-      }
-      finalState = state;
-      const updateRange = compatibilityRenderRange(update, state, this.rowsValue);
-      if (updateRange) {
-        range = range
-          ? {
-              start: Math.min(range.start, updateRange.start),
-              end: Math.max(range.end, updateRange.end),
-            }
-          : updateRange;
-      }
-    }
-    this.reconcileMarkers(normalTrimmed, normalReset);
-    if (finalState) this.finalizeViewportUpdate(finalState, range);
+    this.finalizeViewportUpdate(state, renderRange);
   }
 
   private finalizeViewportUpdate(
@@ -1509,6 +1332,11 @@ export class Terminal {
       });
     }
     if (this.decorations.size > 0) this.refreshDecorations();
+    // Report scrolling after the buffer changed so listeners read the new `viewportY`.
+    if (state.viewportY !== this.scrollPosition) {
+      this.scrollPosition = state.viewportY;
+      this.scrollEvent.fire(state.viewportY);
+    }
     const cursor = `${state.cursorX}:${state.cursorY}`;
     if (cursor !== this.lastCursor) {
       this.lastCursor = cursor;
@@ -1559,12 +1387,6 @@ export class Terminal {
       .catch((error: unknown) => {
         if (!this.disposed) this.logError(error);
       });
-  }
-
-  private queueViewportSync(): void {
-    void this.syncViewport().catch((error: unknown) => {
-      if (!this.disposed) this.logError(error);
-    });
   }
 
   private pointerSelection(startX: number, startY: number, endX: number, endY: number): void {
@@ -1780,16 +1602,20 @@ export class Terminal {
     return value;
   }
 
-  private emitLineFeeds(data: string | Uint8Array): void {
+  /** Normalizes and encodes one write, then applies parser hooks and reports its line feeds. */
+  private async filterWrite(data: string | Uint8Array): Promise<Uint8Array> {
+    const normalized = this.normalizeWrite(data);
+    const encoded = typeof normalized === 'string' ? this.encoder.encode(normalized) : normalized;
+    const bytes = this.parserValue.active ? await this.parserValue.process(encoded) : encoded;
+    this.emitLineFeeds(bytes);
+    return bytes;
+  }
+
+  private emitLineFeeds(data: Uint8Array): void {
     if (!this.lineFeedEvent.hasListeners) return;
     let count = 0;
-    if (typeof data === 'string') {
-      for (let index = 0; index < data.length; index += 1) {
-        if (data.charCodeAt(index) === 0x0a) count += 1;
-      }
-    } else {
-      for (const byte of data) if (byte === 0x0a) count += 1;
-    }
+    for (let index = data.indexOf(0x0a); index !== -1; index = data.indexOf(0x0a, index + 1))
+      count += 1;
     for (let index = 0; index < count; index += 1) this.lineFeedEvent.fire(undefined);
   }
 
@@ -1856,7 +1682,6 @@ export class Terminal {
       );
     }
     if (value.scrollback !== undefined && next.scrollback !== previous.scrollback) {
-      this.bufferValue.reserveNormal(this.rowsValue + (next.scrollback ?? 1000));
       this.queueNative((native) => native.setScrollbackLines(next.scrollback ?? 1000));
       this.updateScrollbarGutter();
     }
@@ -1937,23 +1762,6 @@ export class Terminal {
 function normalizeDimension(value: number | undefined, fallback: number, minimum: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
   return Math.max(minimum, Math.min(65_535, Math.trunc(value)));
-}
-
-function compatibilityRenderRange(
-  update: CoreCompatibilityUpdate,
-  state: TerminalBufferState,
-  rows: number
-): XtermRenderEvent | null {
-  if (update.dirty === 'full') return { start: 0, end: Math.max(0, rows - 1) };
-  let start = rows;
-  let end = -1;
-  for (const row of update.rows) {
-    const visible = row.index - state.viewportY;
-    if (visible < 0 || visible >= rows) continue;
-    start = Math.min(start, visible);
-    end = Math.max(end, visible);
-  }
-  return end >= start ? { start, end } : null;
 }
 
 function verifyIntegers(...values: number[]): void {

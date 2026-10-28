@@ -34,7 +34,7 @@ export const EXTERNAL_CONSUMER_DEPENDENCIES = Object.freeze({
   react: '19.1.1',
   'react-dom': '19.1.1',
   svelte: '5.55.7',
-  vue: '3.5.21',
+  vue: '3.5.44',
 });
 
 export function parsePublishedHarnessArgs(argv) {

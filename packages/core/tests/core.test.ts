@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { createCoreRuntime, KeyModifiers } from '../src/core';
-import { XtermCompatibilityReader } from '../src/core/xterm-reader.js';
+import {
+  XTERM_CELL_WORDS,
+  type XtermCompatibilityRow,
+} from '../src/internal/xterm-compatibility.js';
 
 describe('Ghostty core runtime', () => {
   it('parses VT, renders rows, and emits terminal effects', async () => {
@@ -35,6 +38,8 @@ describe('Ghostty core runtime', () => {
         terminal.key({ code: 'KeyC', text: 'c', modifiers: KeyModifiers.control })
       )
     ).toBe('\u0003');
+    terminal.selectAll();
+    expect(terminal.getSelection()).toBe('');
     terminal.write('\u001b[?2004hline one\r\nline two');
     expect(new TextDecoder().decode(terminal.paste('x'))).toBe('\u001b[200~x\u001b[201~');
     terminal.selectAll();
@@ -279,53 +284,50 @@ describe('Ghostty core runtime', () => {
     runtime.dispose();
   });
 
-  it('packs Ghostty render state for the xterm compatibility journal', async () => {
+  it('packs retained rows in the xterm cell format', async () => {
     const runtime = await createCoreRuntime();
     const terminal = runtime.createTerminal({ cols: 6, rows: 3, scrollbackLines: 20 });
-
     terminal.write(
       '\x1b]8;;https://example.com\x07' +
         '\x1b[1;3;4;5;7;8;9;53;38;5;42;48;2;1;2;3mA' +
         '\x1b[0m\x1b]8;;\x07e\u0301界123456'
     );
-    const initial = terminal.xtermCompatibilityUpdate();
+    const rows = terminal.xtermRows(0, terminal.bufferState().totalRows);
+    const [first, second] = rows;
+    if (!first || !second) throw new Error('Expected two rows');
 
-    expect(initial.dirty).toBe('full');
-    expect(initial.reset).toBe(true);
-    expect(initial.rows.length).toBe(initial.state.totalRows);
-    expect(initial.rows.some((row) => row.strings.some(([, value]) => value === 'é'))).toBe(true);
-    expect(
-      initial.rows.some((row) =>
-        row.hyperlinks.some(([, value]) => value === 'https://example.com')
-      )
-    ).toBe(true);
-    expect(initial.rows.some((row) => row.cells.some((word) => word !== 0))).toBe(true);
-    expect(initial.rows.some((row) => row.wrapped || row.wrapContinuation)).toBe(true);
+    // Content word: code point, width, combined flag, underline style, and the present bit.
+    const [content, foreground, background] = first.cells;
+    expect((content ?? 0) & 0x1fffff).toBe(0x41);
+    expect(((content ?? 0) >>> 24) & 0x7).toBe(1);
+    expect(((content ?? 0) >>> 27) & 1).toBe(1);
+    // Foreground: 256-color palette 42 plus bold and italic.
+    expect((foreground ?? 0) & 0xffffff).toBe(42);
+    expect(((foreground ?? 0) >>> 24) & 0x3).toBe(2);
+    expect(((foreground ?? 0) >>> 26) & 0x3).toBe(0x3);
+    // Background: RGB 1,2,3 plus blink, inverse, invisible, strikethrough, and overline.
+    expect((background ?? 0) & 0xffffff).toBe(0x010203);
+    expect(((background ?? 0) >>> 24) & 0x3).toBe(3);
+    expect(((background ?? 0) >>> 26) & 0x1f).toBe(0x1f);
 
-    const clean = terminal.xtermCompatibilityUpdate();
-    expect(clean).toMatchObject({ dirty: 'clean', reset: false, rows: [] });
-
-    terminal.beginXtermCompatibilityBatch();
-    terminal.write('\r\nnext');
-    const partial = terminal.xtermCompatibilityUpdate();
-    expect(partial.dirty).toBe('partial');
-    expect(partial.reset).toBe(false);
-    expect(partial.rows.some((row) => row.cells.length > 0)).toBe(true);
-
-    terminal.resize(8, 4);
-    expect(terminal.xtermCompatibilityUpdate().dirty).toBe('full');
-
-    const disposedReader = new XtermCompatibilityReader(runtime.bindings);
-    disposedReader.invalidate();
-    disposedReader.dispose();
-    disposedReader.dispose();
-    expect(() =>
-      disposedReader.read(0, initial.state, {
-        selectCompatibilityRow: () => -1,
-        compatibilityHyperlinkUri: () => null,
-      } as never)
-    ).toThrow('XtermCompatibilityReader is disposed');
-
+    expect(first.hyperlinks).toEqual([[0, 'https://example.com']]);
+    expect(first.strings).toEqual([[1, 'e\u0301']]);
+    expect(((first.cells[2 * XTERM_CELL_WORDS] ?? 0) >>> 21) & 0x3).toBe(1);
+    expect(((first.cells[3 * XTERM_CELL_WORDS] ?? 0) >>> 21) & 0x3).toBe(2);
+    expect(first.wrapped).toBe(true);
+    expect(second.wrapContinuation).toBe(true);
+    expect(rowText(second)).toBe('3456');
     runtime.dispose();
   });
 });
+
+function rowText(row: XtermCompatibilityRow): string {
+  const text: string[] = [];
+  for (let column = 0; column < row.cells.length / XTERM_CELL_WORDS; column += 1) {
+    // The first word uses xterm.js's content layout: the code point is in the low 21 bits.
+    const codepoint = (row.cells[column * XTERM_CELL_WORDS] ?? 0) & 0x1fffff;
+    text.push(codepoint ? String.fromCodePoint(codepoint) : ' ');
+  }
+  for (const [column, value] of row.strings) text[column] = value;
+  return text.join('').trimEnd();
+}

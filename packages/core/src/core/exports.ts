@@ -44,7 +44,7 @@ export interface GhosttyDeclaredExports {
   ghostty_render_state_get(state: number, data: number, out: number): number;
   ghostty_render_state_row_iterator_new(allocator: number, out: number): number;
   ghostty_render_state_row_iterator_free(iterator: number): void;
-  ghostty_render_state_row_iterator_next(iterator: number, outY: number): boolean;
+  ghostty_render_state_row_iterator_next(iterator: number): boolean;
   ghostty_render_state_row_iterator_next_dirty(iterator: number, outY: number): boolean;
   ghostty_render_state_row_get(iterator: number, data: number, out: number): number;
   ghostty_render_state_row_cells_new(allocator: number, out: number): number;
@@ -114,6 +114,10 @@ export interface GhosttyDeclaredExports {
   ): number;
   ghostty_terminal_select_all(terminal: number, selection: number): number;
   ghostty_terminal_grid_ref(terminal: number, point: number, out: number): number;
+  ghostty_terminal_grid_ref_track(terminal: number, point: number, out: number): number;
+  ghostty_tracked_grid_ref_set(ref: number, terminal: number, point: number): number;
+  ghostty_tracked_grid_ref_point(ref: number, tag: number, out: number): number;
+  ghostty_tracked_grid_ref_free(ref: number): void;
   ghostty_grid_ref_cell(ref: number, out: number): number;
   ghostty_grid_ref_row(ref: number, out: number): number;
   ghostty_grid_ref_graphemes(ref: number, out: number, capacity: number, outLength: number): number;

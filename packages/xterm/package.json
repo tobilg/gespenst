@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/xterm",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "xterm.js 6.0 public API compatibility powered by Ghostty",
   "keywords": [
     "terminal",

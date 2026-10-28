@@ -1,10 +1,4 @@
-import type {
-  CellColor,
-  RenderCell,
-  RgbColor,
-  TerminalBufferRow,
-  TerminalBufferSnapshot,
-} from '@gespenst/core';
+import type { CellColor, RenderCell, RgbColor, TerminalBufferState } from '@gespenst/core';
 import type { IBuffer, IBufferCell, IBufferLine, IBufferNamespace } from '@xterm/xterm';
 import { EventEmitter } from './events';
 
@@ -21,27 +15,11 @@ export type PackedBufferString = readonly [column: number, value: string];
 
 export interface PackedBufferRow {
   readonly index: number;
-  readonly id?: string;
   readonly cells: Uint32Array;
   readonly strings: readonly PackedBufferString[];
   readonly hyperlinks: readonly PackedBufferString[];
   readonly wrapped: boolean;
   readonly wrapContinuation: boolean;
-}
-
-export interface PackedBufferSnapshot {
-  readonly state: TerminalBufferSnapshot['state'];
-  readonly rows: readonly PackedBufferRow[];
-  /** Explicit journal operations emitted by the version-matched core bridge. */
-  readonly trimmed?: number;
-  readonly appendStart?: number;
-  readonly reset?: boolean;
-}
-
-export interface BufferUpdateResult {
-  readonly missing: { readonly start: number; readonly end: number } | null;
-  readonly trimmed: number;
-  readonly identityReset: boolean;
 }
 
 function colorNumber(color: RgbColor | null): number {
@@ -192,11 +170,6 @@ class BufferLine implements IBufferLine {
     this.length = Math.max(cols, this.row.cells.length / CELL_WORDS);
   }
 
-  update(row: PackedBufferRow, cols: number): void {
-    this.row = row;
-    this.resize(cols);
-  }
-
   getCell(x: number, cell?: IBufferCell): IBufferCell | undefined {
     if (x < 0 || x >= this.length) return undefined;
     const target = cell instanceof BufferCell ? cell : new BufferCell();
@@ -219,147 +192,120 @@ class BufferLine implements IBufferLine {
   }
 }
 
-function packedRow(row: TerminalBufferRow): PackedBufferRow {
-  let cellCount = row.cells.length;
-  while (cellCount > 0 && isDefaultBlank(row.cells[cellCount - 1])) cellCount -= 1;
-  const cells = new Uint32Array(cellCount * CELL_WORDS);
-  const strings: PackedBufferString[] = [];
-  const hyperlinks: PackedBufferString[] = [];
-  for (let index = 0; index < cellCount; index += 1) {
-    const cell = row.cells[index];
-    if (!cell) continue;
-    const packed = packCell(cell);
-    const offset = cell.x * CELL_WORDS;
-    if (offset < 0 || offset + 2 >= cells.length) continue;
-    cells[offset] = packed.content;
-    cells[offset + 1] = packed.foreground;
-    cells[offset + 2] = packed.background;
-    if ((packed.content & CONTENT_COMBINED) !== 0) strings.push([cell.x, packed.chars]);
-    if (cell.hyperlinkUri) hyperlinks.push([cell.x, cell.hyperlinkUri]);
-  }
-  return {
-    index: row.index,
-    id: row.id,
-    cells,
-    strings,
-    hyperlinks,
-    wrapped: row.wrapped,
-    wrapContinuation: row.wrapContinuation,
-  };
+/** Where a {@link BufferView} reads its metadata and rows. */
+export interface BufferViewSource {
+  state(): TerminalBufferState;
+  rows(start: number, end: number): readonly PackedBufferRow[];
 }
 
+/** How the active screen's rows moved and changed since the previous synchronization. */
+export interface BufferChanges {
+  readonly state: TerminalBufferState;
+  /** Rows pruned from the top of history; every older index moved up by this many rows. */
+  readonly trimmed: number;
+  /** Row identity was lost and every cached row must be dropped. */
+  readonly reset: boolean;
+  /** First index whose content may have changed; rows before it are unchanged. */
+  readonly dirtyFrom: number;
+}
+
+/** The core buffer source a {@link BufferNamespace} synchronizes from. */
+export interface BufferNamespaceSource extends BufferViewSource {
+  normalState(): TerminalBufferState;
+  normalRows(start: number, end: number): readonly PackedBufferRow[];
+}
+
+/** Rows read from the source at once when a line is first requested. */
+const BLOCK_ROWS = 64;
+
+/**
+ * One xterm buffer whose rows are read from Ghostty on demand.
+ *
+ * @remarks
+ * Lines are cached in blocks of {@link BLOCK_ROWS} rows. Block keys count every row the view has
+ * seen, including pruned ones, so pruning history moves no cached line. Without a source the view
+ * holds one screen of blank rows, like xterm's inactive alternate buffer.
+ */
 export class BufferView implements IBuffer {
   readonly type: 'normal' | 'alternate';
-  cursorY = 0;
-  cursorX = 0;
-  viewportY = 0;
-  baseY = 0;
-  private lines: Array<BufferLine | undefined> = [];
-  private head = 0;
-  private lengthValue = 0;
-  private definedCount = 0;
+  private source: BufferViewSource | null = null;
+  private stateValue: TerminalBufferState | null = null;
+  private readonly blocks = new Map<number, Array<BufferLine | undefined>>();
+  /** Rows pruned since the cache was last cleared; added to an index to find its block. */
+  private trimmedRows = 0;
   private cols: number;
+  private rows: number;
 
-  constructor(type: 'normal' | 'alternate', cols: number, rows: number, capacity = rows) {
+  constructor(type: 'normal' | 'alternate', cols: number, rows: number) {
     this.type = type;
     this.cols = cols;
-    this.ensureCapacity(Math.max(rows, capacity));
-    this.setLength(rows, true);
+    this.rows = rows;
   }
 
   get length(): number {
-    return this.lengthValue;
+    return this.state()?.totalRows ?? this.rows;
+  }
+  get baseY(): number {
+    return this.state()?.scrollbackRows ?? 0;
+  }
+  get viewportY(): number {
+    return this.state()?.viewportY ?? 0;
+  }
+  get cursorX(): number {
+    return this.state()?.cursorX ?? 0;
+  }
+  get cursorY(): number {
+    return this.state()?.cursorY ?? 0;
+  }
+
+  /** Serves `source`. Its state is `state` when known, or read when first needed. */
+  attach(source: BufferViewSource, state?: TerminalBufferState): void {
+    this.source = source;
+    this.stateValue = state ?? null;
+    this.clear();
+  }
+
+  /** Serves one screen of blank rows. */
+  detach(): void {
+    if (!this.source) return;
+    this.source = null;
+    this.stateValue = null;
+    this.clear();
+  }
+
+  /** Whether the view currently serves `source`. */
+  serves(source: BufferViewSource): boolean {
+    return this.source === source;
+  }
+
+  /** Drops cached lines that `changes` moved out of the buffer or may have changed. */
+  apply(changes: BufferChanges): void {
+    this.stateValue = changes.state;
+    if (changes.reset) {
+      this.clear();
+      return;
+    }
+    this.trimmedRows += changes.trimmed;
+    const firstKept = Math.floor(this.trimmedRows / BLOCK_ROWS);
+    const firstDirty = Math.floor((changes.dirtyFrom + this.trimmedRows) / BLOCK_ROWS);
+    for (const key of this.blocks.keys()) {
+      if (key < firstKept || key >= firstDirty) this.blocks.delete(key);
+    }
   }
 
   resize(cols: number, rows: number): void {
     this.cols = cols;
-    if (this.lengthValue < rows) this.setLength(rows, true);
-  }
-
-  reserve(capacity: number): void {
-    this.ensureCapacity(capacity);
-  }
-
-  update(
-    snapshot: TerminalBufferSnapshot | PackedBufferSnapshot,
-    cols: number
-  ): BufferUpdateResult {
-    const { state } = snapshot;
-    const rows = snapshot.rows.map((row) => (isPackedRow(row) ? row : packedRow(row)));
-    this.cols = cols;
-    let needsFullRead = false;
-    let trimmed = 0;
-    let identityReset = false;
-    this.cursorX = state.cursorX;
-    this.cursorY = state.cursorY;
-    this.baseY = state.scrollbackRows;
-    this.viewportY = state.viewportY;
-
-    if (isSemanticSnapshot(snapshot)) {
-      const hadRows = this.hasRetainedRows();
-      if (snapshot.reset) {
-        identityReset = hadRows;
-        this.resetStorage(state.totalRows);
-      } else {
-        trimmed = Math.min(snapshot.trimmed, this.lengthValue);
-        if (trimmed > 0) this.trimFront(trimmed, state.totalRows);
-        else this.setLength(state.totalRows);
-      }
-      for (const row of rows) this.setRow(row.index, row);
-      return {
-        missing: this.missingRange(snapshot.appendStart),
-        trimmed,
-        identityReset,
-      };
-    }
-
-    const completePage = rows[0]?.index === 0 && rows.length === state.totalRows;
-    const retained = rows.find((row) => row.id !== undefined && this.findRowIndex(row.id) >= 0);
-    const previousIndex = retained?.id ? this.findRowIndex(retained.id) : -1;
-    const shift = retained && previousIndex >= 0 ? retained.index - previousIndex : 0;
-    trimmed = Math.max(0, -shift);
-    if (completePage) {
-      identityReset = this.hasRetainedRows() && rows.length > 0 && !retained;
-      this.resetStorage(state.totalRows);
-    } else if (this.definedCount > 0 && rows.length > 0) {
-      const first = rows[0];
-      if (retained && previousIndex >= 0) {
-        if (shift < 0) this.trimFront(-shift, state.totalRows);
-        else if (shift > 0) needsFullRead = true;
-      } else if (first && this.getLineValue(first.index)) {
-        needsFullRead = true;
-      }
-    }
-    if (!completePage && shift >= 0) {
-      trimmed = Math.max(trimmed, Math.max(0, this.lengthValue - state.totalRows));
-      this.setLength(state.totalRows);
-    }
-    for (const row of rows) this.setRow(row.index, row);
-    if (needsFullRead)
-      return {
-        missing: { start: 0, end: state.totalRows },
-        trimmed,
-        identityReset,
-      };
-    if (this.definedCount === state.totalRows) return { missing: null, trimmed, identityReset };
-    return {
-      // A sparse/non-overlapping delta is exceptional. Request one authoritative page without
-      // scanning every retained row; steady-state append/trim updates keep rowSlots complete.
-      missing: { start: 0, end: state.totalRows },
-      trimmed,
-      identityReset,
-    };
+    if (rows === this.rows) return;
+    this.rows = rows;
+    if (!this.source) this.clear();
   }
 
   getLine(y: number): IBufferLine | undefined {
-    if (y < 0 || y >= this.lengthValue) return undefined;
-    const line = this.lines[this.slot(y)];
-    line?.resize(this.cols);
-    return line;
+    return this.line(y);
   }
 
   getHyperlink(y: number, x: number): string | undefined {
-    const row = this.getLineValue(y)?.row;
+    const row = this.line(y)?.row;
     return row ? findSparseValue(row.hyperlinks, x) : undefined;
   }
 
@@ -367,114 +313,39 @@ export class BufferView implements IBuffer {
     return new BufferCell();
   }
 
-  private ensureCapacity(length: number): void {
-    if (this.lines.length >= length) return;
-    let capacity = Math.max(16, this.lines.length || 1);
-    while (capacity < length) capacity *= 2;
-    const nextLines: Array<BufferLine | undefined> = new Array(capacity);
-    for (let index = 0; index < this.lengthValue; index += 1) {
-      const previousSlot = this.slot(index);
-      const line = this.lines[previousSlot];
-      nextLines[index] = line;
+  private state(): TerminalBufferState | null {
+    if (!this.stateValue && this.source) this.stateValue = this.source.state();
+    return this.stateValue;
+  }
+
+  private line(y: number): BufferLine | undefined {
+    if (!Number.isInteger(y) || y < 0 || y >= this.length) return undefined;
+    const position = y + this.trimmedRows;
+    const key = Math.floor(position / BLOCK_ROWS);
+    let line = this.blocks.get(key)?.[position - key * BLOCK_ROWS];
+    if (!line) line = this.loadBlock(key)[position - key * BLOCK_ROWS];
+    line?.resize(this.cols);
+    return line;
+  }
+
+  private loadBlock(key: number): Array<BufferLine | undefined> {
+    const first = key * BLOCK_ROWS - this.trimmedRows;
+    const start = Math.max(0, first);
+    const end = Math.min(this.length, first + BLOCK_ROWS);
+    const block: Array<BufferLine | undefined> = new Array(BLOCK_ROWS);
+    for (const row of this.source?.rows(start, end) ?? []) {
+      if (row.index >= start && row.index < end)
+        block[row.index - first] = new BufferLine(row, this.cols);
     }
-    this.lines = nextLines;
-    this.head = 0;
+    for (let index = start; index < end; index += 1)
+      block[index - first] ??= blankLine(this.cols, index);
+    this.blocks.set(key, block);
+    return block;
   }
 
-  private setLength(length: number, fillBlanks = false): void {
-    const next = Math.max(0, length);
-    this.ensureCapacity(next);
-    if (next < this.lengthValue) {
-      for (let index = next; index < this.lengthValue; index += 1) this.clearSlot(this.slot(index));
-    } else {
-      for (let index = this.lengthValue; index < next; index += 1) {
-        const slot = this.slot(index);
-        this.lines[slot] = fillBlanks ? blankLine(this.cols, index) : undefined;
-        if (fillBlanks) this.definedCount += 1;
-      }
-    }
-    this.lengthValue = next;
-  }
-
-  private resetStorage(length: number): void {
-    this.lines = [];
-    this.head = 0;
-    this.lengthValue = 0;
-    this.definedCount = 0;
-    this.ensureCapacity(length);
-    this.setLength(length);
-  }
-
-  private trimFront(count: number, totalRows: number): void {
-    const amount = Math.min(Math.max(0, count), this.lengthValue);
-    for (let index = 0; index < amount; index += 1) this.clearSlot(this.slot(index));
-    if (this.lines.length > 0) this.head = (this.head + amount) % this.lines.length;
-    this.lengthValue -= amount;
-    this.setLength(totalRows);
-  }
-
-  private setRow(index: number, row: PackedBufferRow): void {
-    if (index < 0 || index >= this.lengthValue) return;
-    const slot = this.slot(index);
-    const line = this.lines[slot];
-    if (line) line.update(row, this.cols);
-    else {
-      this.lines[slot] = new BufferLine(row, this.cols);
-      this.definedCount += 1;
-    }
-  }
-
-  private clearSlot(slot: number): void {
-    if (this.lines[slot]) this.definedCount -= 1;
-    this.lines[slot] = undefined;
-  }
-
-  private findRowIndex(id: string): number {
-    for (let index = 0; index < this.lengthValue; index += 1) {
-      if (this.lines[this.slot(index)]?.row.id === id) return index;
-    }
-    return -1;
-  }
-
-  private hasRetainedRows(): boolean {
-    for (let index = 0; index < this.lengthValue; index += 1) {
-      const id = this.lines[this.slot(index)]?.row.id;
-      if (id && !id.startsWith('blank:')) return true;
-    }
-    return false;
-  }
-
-  private missingRange(start: number): { readonly start: number; readonly end: number } | null {
-    if (this.definedCount === this.lengthValue) return null;
-    let first = -1;
-    let last = -1;
-    for (
-      let index = Math.max(0, Math.min(start, this.lengthValue));
-      index < this.lengthValue;
-      index += 1
-    ) {
-      if (this.lines[this.slot(index)]) continue;
-      if (first < 0) first = index;
-      last = index;
-    }
-    if (first < 0) {
-      for (let index = 0; index < Math.min(start, this.lengthValue); index += 1) {
-        if (this.lines[this.slot(index)]) continue;
-        if (first < 0) first = index;
-        last = index;
-      }
-    }
-    return first < 0 ? null : { start: first, end: last + 1 };
-  }
-
-  private getLineValue(index: number): BufferLine | undefined {
-    if (index < 0 || index >= this.lengthValue) return undefined;
-    return this.lines[this.slot(index)];
-  }
-
-  private slot(index: number): number {
-    if (this.lines.length === 0) return 0;
-    return (this.head + index) % this.lines.length;
+  private clear(): void {
+    this.blocks.clear();
+    this.trimmedRows = 0;
   }
 }
 
@@ -482,11 +353,13 @@ export class BufferNamespace implements IBufferNamespace {
   readonly normal: BufferView;
   readonly alternate: BufferView;
   private activeValue: BufferView;
+  private activeSource: BufferViewSource | null = null;
+  private normalSource: BufferViewSource | null = null;
   private readonly change = new EventEmitter<IBuffer>();
   readonly onBufferChange = this.change.event;
 
-  constructor(cols: number, rows: number, scrollback = 0) {
-    this.normal = new BufferView('normal', cols, rows, rows + scrollback);
+  constructor(cols: number, rows: number) {
+    this.normal = new BufferView('normal', cols, rows);
     this.alternate = new BufferView('alternate', cols, rows);
     this.activeValue = this.normal;
   }
@@ -502,21 +375,35 @@ export class BufferNamespace implements IBufferNamespace {
     this.change.fire(next);
   }
 
-  update(
-    snapshot: TerminalBufferSnapshot | PackedBufferSnapshot,
-    cols: number
-  ): BufferUpdateResult {
-    this.setAlternate(snapshot.state.screen === 'alternate');
-    return this.activeValue.update(snapshot, cols);
+  /**
+   * Applies changes read from `source`. While the alternate screen is active, the normal buffer
+   * reads Ghostty's normal screen and drops its cache on every change, since a single write can
+   * leave the alternate screen and come back.
+   */
+  sync(source: BufferNamespaceSource, changes: BufferChanges): void {
+    if (!this.activeSource) {
+      this.activeSource = { state: () => source.state(), rows: (s, e) => source.rows(s, e) };
+      this.normalSource = {
+        state: () => source.normalState(),
+        rows: (s, e) => source.normalRows(s, e),
+      };
+    }
+    const active = this.activeSource;
+    if (changes.state.screen === 'alternate') {
+      if (!this.alternate.serves(active)) this.alternate.attach(active);
+      this.alternate.apply(changes);
+      if (this.normalSource) this.normal.attach(this.normalSource);
+    } else {
+      if (!this.normal.serves(active)) this.normal.attach(active);
+      this.normal.apply(changes);
+      this.alternate.detach();
+    }
+    this.setAlternate(changes.state.screen === 'alternate');
   }
 
   resize(cols: number, rows: number): void {
     this.normal.resize(cols, rows);
     this.alternate.resize(cols, rows);
-  }
-
-  reserveNormal(capacity: number): void {
-    this.normal.reserve(capacity);
   }
 
   /** @internal Returns Ghostty cell metadata for compatibility services such as OSC 8 links. */
@@ -530,14 +417,14 @@ export class BufferNamespace implements IBufferNamespace {
   }
 }
 
+const NO_CELLS = new Uint32Array(0);
+
+/** A row without cells; every column reads as a blank default cell. */
 function blankLine(cols: number, y: number): BufferLine {
-  const cells = new Uint32Array(cols * CELL_WORDS);
-  for (let x = 0; x < cols; x += 1) cells[x * CELL_WORDS] = CONTENT_PRESENT;
   return new BufferLine(
     {
       index: y,
-      id: `blank:${y}`,
-      cells,
+      cells: NO_CELLS,
       strings: [],
       hyperlinks: [],
       wrapped: false,
@@ -612,40 +499,4 @@ function findSparseValue(
     if (candidate > column) return undefined;
   }
   return undefined;
-}
-
-function isPackedRow(row: TerminalBufferRow | PackedBufferRow): row is PackedBufferRow {
-  return row.cells instanceof Uint32Array;
-}
-
-function isSemanticSnapshot(
-  snapshot: TerminalBufferSnapshot | PackedBufferSnapshot
-): snapshot is PackedBufferSnapshot &
-  Required<Pick<PackedBufferSnapshot, 'trimmed' | 'appendStart' | 'reset'>> {
-  return (
-    'trimmed' in snapshot &&
-    snapshot.trimmed !== undefined &&
-    snapshot.appendStart !== undefined &&
-    snapshot.reset !== undefined
-  );
-}
-
-function isDefaultBlank(cell: RenderCell | undefined): boolean {
-  if (!cell || cell.text || cell.width !== 'narrow' || cell.hyperlink) return false;
-  const style = cell.style;
-  return (
-    cell.foreground === null &&
-    cell.background === null &&
-    (!cell.foregroundSource || cell.foregroundSource.mode === 'default') &&
-    (!cell.backgroundSource || cell.backgroundSource.mode === 'default') &&
-    !style.bold &&
-    !style.italic &&
-    !style.faint &&
-    !style.blink &&
-    !style.inverse &&
-    !style.invisible &&
-    !style.strikethrough &&
-    !style.overline &&
-    style.underline === 0
-  );
 }

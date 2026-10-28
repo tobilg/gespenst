@@ -43,8 +43,16 @@ export class Allocation {
 export class GhosttyBindings {
   private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder();
+  private dataView: DataView | null = null;
   readonly exports: GhosttyExports;
   readonly abi: GhosttyAbi;
+
+  /** A view over all of the WASM memory, recreated only after the memory grows. */
+  get memoryView(): DataView {
+    const buffer = this.exports.memory.buffer;
+    if (this.dataView?.buffer !== buffer) this.dataView = new DataView(buffer);
+    return this.dataView;
+  }
 
   constructor(exports: GhosttyExports, abi: GhosttyAbi) {
     this.exports = exports;

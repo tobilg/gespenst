@@ -36,23 +36,26 @@ const terminal = new Terminal({
   scrollback: 10_000,
   gespenst: {
     ...runtime,
-    worker: 'shared',
     renderer: 'auto',
   },
 });
 ```
 
 `preloadXtermRuntime()` compiles and caches both WASM modules. Pass its result to one or more
-terminals to move compilation out of their startup path. A dedicated worker remains the default;
-use `shared` when many simultaneous terminals should share one Ghostty runtime, or `false` for a
-controlled main-thread benchmark. `renderer: 'auto'` keeps the WebGPU → WebGL2 → Canvas2D fallback
-ladder.
+terminals to move compilation out of their startup path. `renderer: 'auto'` keeps the WebGPU →
+WebGL2 → Canvas2D fallback ladder.
 
-For output, keep PTY data as `Uint8Array` and use write callbacks for flow control. The compatibility
-layer completes callbacks after parsing and xterm buffer synchronization, while `onRender` remains
-the painted-frame boundary. This matches xterm.js and avoids forcing every small write to wait for a
-browser animation frame. Large scrollback writes are internally segmented so the stable xterm
-buffer view retains every row without rereading the full Ghostty buffer.
+Like xterm.js, xterm-compatible terminals parse output on the main thread, so `buffer` answers
+synchronously. Rows are read from Ghostty only when `getLine()` asks for them, which keeps bulk
+output fast with any amount of scrollback. Terminals created with the same WASM sources share one
+Ghostty runtime. There is no `gespenst.worker` option; passing a worker mode throws
+`XtermCompatibilityError`. Use the native `@gespenst/core` API when output parsing must run in a
+worker.
+
+For output, keep PTY data as `Uint8Array` and use write callbacks for flow control. Write callbacks
+run after Ghostty has parsed the data, so `buffer` already shows it, while `onRender` remains the
+painted-frame boundary on the next animation frame. This matches xterm.js and avoids forcing every
+small write to wait for a browser animation frame.
 
 Theme, selection, cursor-accent, extended ANSI, `allowTransparency`, and `minimumContrastRatio`
 options are forwarded to the native renderer. Init-only options can be changed before `open()`;
@@ -102,3 +105,6 @@ when they stay on the stable public API.
   and lower-overhead API.
 - Ghostty owns resize reflow and Unicode width. Compatibility options cannot replace those engines.
 - Unsupported non-default options fail explicitly instead of being silently ignored.
+- Ghostty prunes scrollback a memory page at a time, so a terminal keeps somewhat fewer history rows
+  than its `scrollback` option allows.
+- Changes made through `native`, such as `native.write()`, appear in `buffer` immediately.

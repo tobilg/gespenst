@@ -62,7 +62,11 @@ describe('HybridRenderer', () => {
     for (const style of ['bar', 'underline', 'block-hollow', 'block'] as const) {
       renderer.render(snapshot([cell(0, 'X')], { style }));
     }
+    // Surfaces take the last size of a burst when the next frame paints.
+    renderer.resize({ ...metrics, width: 90, height: 50 });
     renderer.resize({ ...metrics, width: 100, height: 60 });
+    expect(background.canvas.width).toBe(metrics.width);
+    renderer.render(snapshot([cell(0, 'X')]));
     expect(background.canvas.width).toBe(100);
     expect(text.canvas.height).toBe(60);
     renderer.dispose();
@@ -137,6 +141,7 @@ describe('HybridRenderer', () => {
     expect(first.submit).toHaveBeenCalled();
 
     renderer.resize({ ...metrics, width: 120, height: 80 });
+    renderer.render(snapshot([cell(0, 'A')]));
     expect(background.canvas.width).toBe(120);
     expect(gpuContext.configure).toHaveBeenLastCalledWith({
       device: first.value,

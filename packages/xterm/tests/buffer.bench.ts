@@ -1,148 +1,75 @@
-import type { RenderCell, TerminalBufferSnapshot } from '@gespenst/core';
+import type { TerminalBufferState } from '@gespenst/core';
 import { bench, describe } from 'vitest';
-import { BufferView } from '../src/buffer';
+import { BufferView, type PackedBufferRow } from '../src/buffer';
 
-const tailReplacementCases = [1_000, 10_000, 100_000].map(tailReplacementCase);
+const COLS = 120;
+const ROWS = 40;
 
-describe('xterm incremental buffer synchronization', () => {
-  for (const value of tailReplacementCases) {
-    bench(`replace tail / ${value.totalRows.toLocaleString('en-US')} retained rows`, () => {
-      value.update();
+describe('xterm buffer synchronization', () => {
+  for (const totalRows of [1_000, 10_000, 100_000]) {
+    const value = scrollingCase(totalRows);
+    bench(`append, trim, and read the viewport / ${label(totalRows)} retained rows`, () => {
+      value.step();
     });
   }
 
-  for (const totalRows of [1_000, 10_000, 100_000]) {
-    const value = appendTrimCase(totalRows);
-    bench(`append and trim / ${totalRows.toLocaleString('en-US')} retained rows`, () => {
-      value.update();
-    });
-  }
-
-  for (const totalRows of [1_000, 10_000, 100_000]) {
-    const view = new BufferView('normal', 120, 40);
-    view.update(snapshot(totalRows), 120);
-    let revision = 2;
-    bench(`replace viewport / ${totalRows.toLocaleString('en-US')} retained rows`, () => {
-      view.update(changedViewport(totalRows, revision), 120);
-      revision += 1;
+  for (const totalRows of [1_000, 10_000]) {
+    bench(`read every line once / ${label(totalRows)} retained rows`, () => {
+      const view = new BufferView('normal', COLS, ROWS);
+      view.attach(source(totalRows), state(totalRows));
+      for (let y = 0; y < totalRows; y += 1) view.getLine(y);
     });
   }
 });
 
-function tailReplacementCase(totalRows: number) {
-  const view = new BufferView('normal', 120, 40);
-  view.update(snapshot(totalRows), 120);
-  let revision = 2;
+/** Output scrolls one row per step at the scrollback limit, and the viewport is read each time. */
+function scrollingCase(totalRows: number) {
+  const view = new BufferView('normal', COLS, ROWS);
+  const rowSource = source(totalRows);
+  view.attach(rowSource, state(totalRows));
+  for (let y = 0; y < totalRows; y += 1) view.getLine(y);
   return {
-    totalRows,
-    update() {
-      const index = totalRows - 1;
-      view.update(
-        {
-          state: state(totalRows, revision),
-          rows: [row(index, `row-${index}`, `changed-${revision}`)],
-          trimmed: 0,
-          appendStart: totalRows,
-          reset: false,
-        },
-        120
-      );
-      revision += 1;
+    step() {
+      view.apply({
+        state: state(totalRows),
+        trimmed: 1,
+        reset: false,
+        dirtyFrom: totalRows - ROWS - 1,
+      });
+      for (let y = totalRows - ROWS; y < totalRows; y += 1) view.getLine(y);
     },
   };
 }
 
-function appendTrimCase(totalRows: number) {
-  const view = new BufferView('normal', 120, 40);
-  view.update(snapshot(totalRows), 120);
-  let firstId = `row-${totalRows - 1}`;
-  let sequence = totalRows;
-  let revision = 2;
+function source(totalRows: number) {
+  const cells = new Uint32Array(COLS * 3).fill((0x61 & 0x1fffff) | (1 << 27));
   return {
-    update() {
-      const nextId = `row-${sequence}`;
-      view.update(
-        {
-          state: state(totalRows, revision),
-          rows: [row(totalRows - 2, firstId), row(totalRows - 1, nextId)],
-          trimmed: 1,
-          appendStart: totalRows - 1,
-          reset: false,
-        },
-        120
-      );
-      firstId = nextId;
-      sequence += 1;
-      revision += 1;
-    },
+    state: () => state(totalRows),
+    rows: (start: number, end: number): PackedBufferRow[] =>
+      Array.from({ length: end - start }, (_, offset) => ({
+        index: start + offset,
+        cells,
+        strings: [],
+        hyperlinks: [],
+        wrapped: false,
+        wrapContinuation: false,
+      })),
   };
 }
 
-function snapshot(totalRows: number): TerminalBufferSnapshot {
+function state(totalRows: number): TerminalBufferState {
   return {
-    state: state(totalRows, 1),
-    rows: Array.from({ length: totalRows }, (_, index) => row(index, `row-${index}`)),
-  };
-}
-
-function changedViewport(totalRows: number, revision: number) {
-  const start = Math.max(0, totalRows - 40);
-  return {
-    state: state(totalRows, revision),
-    rows: Array.from({ length: totalRows - start }, (_, offset) => {
-      const index = start + offset;
-      return row(index, `row-${index}`, `changed-${revision}-${index}`);
-    }),
-    trimmed: 0,
-    appendStart: totalRows,
-    reset: false,
-  };
-}
-
-function state(totalRows: number, revision: number) {
-  return {
-    screen: 'normal' as const,
+    screen: 'normal',
     totalRows,
-    scrollbackRows: Math.max(0, totalRows - 40),
-    viewportY: Math.max(0, totalRows - 40),
-    viewportLength: Math.min(40, totalRows),
+    scrollbackRows: totalRows - ROWS,
+    viewportY: totalRows - ROWS,
+    viewportLength: ROWS,
     cursorX: 0,
-    cursorY: 39,
-    revision,
+    cursorY: ROWS - 1,
+    revision: 1,
   };
 }
 
-function row(index: number, id: string, text = id) {
-  return {
-    index,
-    id,
-    text,
-    cells: [cell(text)],
-    wrapped: false,
-    wrapContinuation: false,
-    selection: null,
-  };
-}
-
-function cell(text: string): RenderCell {
-  return {
-    x: 0,
-    text,
-    width: 'narrow',
-    foreground: null,
-    background: null,
-    hyperlink: false,
-    semanticContent: 'output',
-    style: {
-      bold: false,
-      italic: false,
-      faint: false,
-      blink: false,
-      inverse: false,
-      invisible: false,
-      strikethrough: false,
-      overline: false,
-      underline: 0,
-    },
-  };
+function label(value: number): string {
+  return value.toLocaleString('en-US');
 }

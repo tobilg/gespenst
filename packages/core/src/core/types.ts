@@ -545,7 +545,13 @@ export type ClipboardLocation = 'standard' | 'selection' | 'primary';
 
 /** Resource limits for an enabled Kitty clipboard protocol integration. */
 export interface ClipboardProtocolOptions {
-  /** Maximum bytes retained or accepted for one clipboard transaction. @defaultValue `33554432` */
+  /**
+   * Maximum bytes retained or accepted for one clipboard transaction.
+   *
+   * @remarks Ghostty discards an OSC sequence longer than 8 MiB while parsing, so an OSC 52 write
+   * request carrying 6 MiB or more of data is dropped without a `clipboardWrite` event.
+   * @defaultValue `33554432`
+   */
   readonly maxBytes?: number;
   /** Maximum lifetime of a user-initiated clipboard snapshot. @defaultValue `30000` */
   readonly snapshotTtlMs?: number;
@@ -658,7 +664,7 @@ export interface GhosttyBuildMetadata {
   readonly size: number;
   /** Version reported by Ghostty. */
   readonly ghosttyVersion: string;
-  /** Source commit reported by Ghostty, when available. */
+  /** Full Ghostty source commit of the nightly release, when known. */
   readonly ghosttyCommit: string | null;
   /** Ghostty ABI manifest schema version. */
   readonly abiSchema: number;

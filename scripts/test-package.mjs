@@ -186,12 +186,10 @@ try {
       return [name, version];
     })
   );
-  const dependencies = {
-    ...Object.fromEntries(
-      plan.map(({ archive, name }) => [name, `file:${resolve(archiveRoot, archive)}`])
-    ),
-    ...peerFixtures,
-  };
+  const archives = Object.fromEntries(
+    plan.map(({ archive, name }) => [name, `file:${resolve(archiveRoot, archive)}`])
+  );
+  const dependencies = { ...archives, ...peerFixtures };
   await writeFile(
     resolve(consumerRoot, 'package.json'),
     `${JSON.stringify(
@@ -200,16 +198,13 @@ try {
         private: true,
         type: 'module',
         dependencies,
-        pnpm: {
-          overrides: Object.fromEntries(
-            plan.map(({ archive, name }) => [name, `file:${resolve(archiveRoot, archive)}`])
-          ),
-        },
       },
       null,
       2
     )}\n`
   );
+  // Internal dependencies between the packages must resolve to these archives too, not npm.
+  await writeFile(resolve(consumerRoot, 'pnpm-workspace.yaml'), overridesYaml(archives));
   await execute(
     'pnpm',
     ['install', '--prefer-offline', '--ignore-scripts', '--config.auto-install-peers=false'],
@@ -549,4 +544,12 @@ async function filesRecursively(directory) {
 function valueAfter(args, flag) {
   const index = args.indexOf(flag);
   return index === -1 ? undefined : args[index + 1];
+}
+
+/** pnpm reads overrides only from `pnpm-workspace.yaml`. */
+function overridesYaml(overrides) {
+  const entries = Object.entries(overrides).map(
+    ([name, spec]) => `  ${JSON.stringify(name)}: ${JSON.stringify(spec)}\n`
+  );
+  return `overrides:\n${entries.join('')}`;
 }

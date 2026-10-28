@@ -200,7 +200,7 @@ function consumerManifest(packages, upstreamXterm) {
       ...EXTERNAL_CONSUMER_DEPENDENCIES,
       '@xterm/xterm': upstreamXterm.version,
       typescript: '7.0.2',
-      vite: '8.2.2',
+      vite: '8.2.4',
     },
   };
 }

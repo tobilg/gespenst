@@ -83,9 +83,22 @@ accessibility mode, scrollback limit, font, and output corpus with every result.
 using the product's mix of active and idle terminals. Shared execution can lower fixed overhead but
 also lets one busy session contend with its neighbors.
 
+Main-thread terminals (`worker: false`) created with the same WASM sources share one Ghostty
+runtime, so each additional terminal adds its own state but not another module instance.
+
 Lazy-create terminals that are visible or imminently needed. Dispose hidden sessions that the
 product does not intend to preserve, or snapshot them before disposal when restoration is cheaper
 than keeping them live.
+
+## The xterm compatibility package
+
+`@gespenst/xterm` runs Ghostty on the main thread, as xterm.js runs its own parser, so that
+`buffer` reads stay synchronous. Parsing costs a few milliseconds per MiB of output, and painting
+happens once per animation frame. Rows are copied out of Ghostty only when `getLine()` asks for
+them, 64 rows at a time, so scrollback size does not slow output down. Code that reads every line
+after every write, such as a naive serializer, pays for those reads; read only the rows you need.
+
+If a page must keep output parsing off the main thread, use the native API with a worker.
 
 ## Related API
 

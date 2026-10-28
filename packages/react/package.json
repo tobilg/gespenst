@@ -1,6 +1,6 @@
 {
   "name": "@gespenst/react",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "React bindings for the Ghostty-powered web terminal",
   "keywords": [
     "terminal",
@@ -38,7 +38,7 @@
     }
   },
   "peerDependencies": {
-    "@gespenst/core": "^0.1.2",
+    "@gespenst/core": "^0.2.0",
     "react": ">=19"
   },
   "devDependencies": {

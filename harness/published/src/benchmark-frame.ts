@@ -74,7 +74,8 @@ interface CoreTiming {
   readonly parseMs: number;
   readonly renderWaitMs: number;
   readonly renderMs: number;
-  readonly compatibilityMs: number;
+  /** Reported only by releases that still built the xterm journal. */
+  readonly compatibilityMs?: number;
   readonly backendMs: number;
 }
 
@@ -106,6 +107,8 @@ const latencySamples = profile === 'ci' ? 10 : 30;
 const throughputSamples = profile === 'ci' ? 5 : 20;
 const throughputWindowMs = profile === 'ci' ? 100 : 250;
 const warmups = profile === 'ci' ? 3 : 5;
+/** xterm.js's default `scrollback`, used for the bulk cases that retain history. */
+const DEFAULT_SCROLLBACK_ROWS = 1_000;
 const longTaskDurations: number[] = [];
 const longTaskObserver = observeLongTasks(longTaskDurations);
 
@@ -370,6 +373,32 @@ async function run(): Promise<FrameResult> {
       await scrollback.settle();
       scrollback.dispose();
     }
+  }
+
+  // The bulk cases above run without history. Real sessions keep scrollback, so repeat the bulk
+  // output with xterm.js's default history.
+  host.replaceChildren();
+  const retained = await implementation.create(host, { scrollback: DEFAULT_SCROLLBACK_ROWS });
+  try {
+    for (const workload of bulkWorkloads(profile).slice(0, 2)) {
+      const throughput = await calibratedThroughput(retained, workload.payload);
+      if (!(await retained.verify(workload.marker)))
+        throw new Error(`${implementation.label} did not retain ${workload.marker}`);
+      cases.push(
+        makeCase(
+          implementation,
+          `${workload.name} / ${DEFAULT_SCROLLBACK_ROWS} scrollback rows`,
+          'callback',
+          'throughput',
+          'MiB/s',
+          throughput,
+          workload.bytes
+        )
+      );
+    }
+  } finally {
+    await retained.settle();
+    retained.dispose();
   }
 
   return {
@@ -701,7 +730,7 @@ function corePhases(timing: CoreTiming): Readonly<Record<string, number>> {
     parse: timing.parseMs,
     renderWait: timing.renderWaitMs,
     render: timing.renderMs,
-    compatibilityDelta: timing.compatibilityMs,
+    ...(timing.compatibilityMs === undefined ? {} : { compatibilityDelta: timing.compatibilityMs }),
     backend: timing.backendMs,
   };
 }

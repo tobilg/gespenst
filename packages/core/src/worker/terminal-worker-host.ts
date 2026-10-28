@@ -6,15 +6,8 @@ import {
   createCoreRuntime,
   type Disposable,
 } from '../core/index.js';
-import { type CoreBenchmarkAccumulator, coreBenchmarkTiming } from '../internal/benchmark.js';
-import {
-  coalesceXtermCompatibilityBatch,
-  compactXtermCompatibilityBatch,
-  mergeXtermCompatibilityUpdates,
-  type XtermCompatibilityBatch,
-  type XtermCompatibilityUpdate,
-  xtermCompatibilityBatchTransferables,
-} from '../internal/xterm-compatibility.js';
+import { coreBenchmarkTiming } from '../internal/benchmark.js';
+import { RenderPipeline, startBenchmark } from '../internal/render-pipeline.js';
 import {
   type MainToWorkerMessage,
   TERMINAL_PROTOCOL_VERSION,
@@ -29,15 +22,8 @@ interface WorkerSession {
   readonly id: number;
   readonly terminal: CoreTerminal;
   readonly renderer: HybridRenderer;
+  readonly pipeline: RenderPipeline;
   metrics: RenderMetrics;
-  renderPending: boolean;
-  readonly renderWaiters: Array<{
-    readonly compatibility: boolean;
-    readonly benchmark?: CoreBenchmarkAccumulator;
-    readonly resolve: (update: XtermCompatibilityUpdate | undefined) => void;
-    readonly reject: (error: Error) => void;
-  }>;
-  accessibility: boolean;
   readonly fontFaces: FontFace[];
   clipboardRegistration: Disposable | null;
 }
@@ -102,60 +88,14 @@ export class TerminalWorkerHost {
     const terminal = session.terminal;
 
     if (message.type === 'write') {
-      const benchmark: CoreBenchmarkAccumulator | undefined = message.benchmark
-        ? {
-            parseMs: 0,
-            scheduledAt: 0,
-            renderWaitMs: 0,
-            renderMs: 0,
-            compatibilityMs: 0,
-            backendStartedAt: performance.now(),
-            renderStartedAt: 0,
-          }
-        : undefined;
-      const data = new Uint8Array(message.data);
-      let batch: XtermCompatibilityBatch | undefined;
-      if (message.compatibilityBoundaries) {
-        const updates: XtermCompatibilityUpdate[] = [];
-        const boundaries = new Uint32Array(message.compatibilityBoundaries);
-        terminal.beginXtermCompatibilityBatch();
-        let start = 0;
-        for (let index = 0; index <= boundaries.length; index += 1) {
-          const requestedEnd = index < boundaries.length ? boundaries[index] : data.byteLength;
-          const end = Math.min(data.byteLength, Math.max(start, requestedEnd ?? data.byteLength));
-          if (end === start && data.byteLength > 0) continue;
-          const parseStartedAt = performance.now();
-          terminal.write(data.subarray(start, end));
-          if (benchmark) benchmark.parseMs += performance.now() - parseStartedAt;
-          const compatibilityStartedAt = performance.now();
-          updates.push(terminal.xtermCompatibilityUpdate());
-          if (benchmark) benchmark.compatibilityMs += performance.now() - compatibilityStartedAt;
-          start = end;
-          if (end === data.byteLength) break;
-        }
-        batch = compactXtermCompatibilityBatch(coalesceXtermCompatibilityBatch(updates));
-        if (benchmark) benchmark.scheduledAt = performance.now();
-        void this.scheduleRender(session);
-      } else {
-        const parseStartedAt = performance.now();
-        terminal.write(data);
-        if (benchmark) {
-          benchmark.parseMs = performance.now() - parseStartedAt;
-          benchmark.scheduledAt = performance.now();
-        }
-        await this.scheduleRender(session, false, benchmark);
-      }
+      const benchmark = message.benchmark ? startBenchmark() : undefined;
+      await session.pipeline.write(new Uint8Array(message.data), benchmark);
       if (message.requestId !== undefined) {
-        this.post(
-          session.id,
-          {
-            type: 'written',
-            requestId: message.requestId,
-            ...(batch ? { batch } : {}),
-            ...(benchmark ? { timing: coreBenchmarkTiming(benchmark) } : {}),
-          },
-          batch ? xtermCompatibilityBatchTransferables(batch) : []
-        );
+        this.post(session.id, {
+          type: 'written',
+          requestId: message.requestId,
+          ...(benchmark ? { timing: coreBenchmarkTiming(benchmark) } : {}),
+        });
       }
       return;
     }
@@ -214,7 +154,7 @@ export class TerminalWorkerHost {
       const value = transferable(terminal.snapshot());
       this.post(session.id, { type: 'snapshot', requestId: message.requestId, value }, [value]);
     } else if (message.type === 'viewport') {
-      if (session.renderPending) await this.scheduleRender(session);
+      if (session.pipeline.pending) await session.pipeline.scheduleRender();
       this.post(session.id, {
         type: 'viewport',
         requestId: message.requestId,
@@ -222,7 +162,7 @@ export class TerminalWorkerHost {
       });
       return;
     } else if (message.type === 'buffer') {
-      if (session.renderPending) await this.scheduleRender(session);
+      if (session.pipeline.pending) await session.pipeline.scheduleRender();
       this.post(session.id, {
         type: 'buffer',
         requestId: message.requestId,
@@ -248,7 +188,7 @@ export class TerminalWorkerHost {
       }
     } else if (message.type === 'theme') {
       await terminal.setTheme(message.theme);
-      await this.scheduleRender(session);
+      await session.pipeline.scheduleRender();
       this.post(session.id, { type: 'themed', requestId: message.requestId });
       return;
     } else if (message.type === 'scrollback') {
@@ -256,22 +196,20 @@ export class TerminalWorkerHost {
     } else if (message.type === 'defaultCursor') {
       terminal.setDefaultCursor(message.style, message.blink);
     } else if (message.type === 'accessibility') {
-      session.accessibility = message.enabled;
+      session.pipeline.accessibility = message.enabled;
     } else if (message.type === 'minimumContrast') {
       session.renderer.setMinimumContrastRatio(message.ratio);
     } else if (message.type === 'dispose') {
       session.clipboardRegistration?.dispose();
       for (const face of session.fontFaces) this.scope.fonts?.delete(face);
-      for (const waiter of session.renderWaiters.splice(0))
-        waiter.reject(new Error('Terminal disposed'));
-      session.renderPending = false;
+      session.pipeline.dispose();
       session.renderer.dispose();
       terminal.dispose();
       this.sessions.delete(session.id);
       this.disposeUnusedRuntime();
       return;
     }
-    void this.scheduleRender(session);
+    session.pipeline.scheduleRender();
   }
 
   private async initialize(message: Extract<MainToWorkerMessage, { type: 'init' }>): Promise<void> {
@@ -297,14 +235,29 @@ export class TerminalWorkerHost {
         message.options.allowTransparency,
         message.options.minimumContrastRatio
       );
-      const session: WorkerSession = {
-        id: message.terminalId,
+      const id = message.terminalId;
+      const pipeline = new RenderPipeline(
         terminal,
         renderer,
+        {
+          schedule: (callback) => {
+            if (typeof this.scope.requestAnimationFrame === 'function')
+              this.scope.requestAnimationFrame(callback);
+            else queueMicrotask(callback);
+          },
+          isActive: () => this.sessions.get(id) === session,
+          rendered: (state) => this.post(id, { type: 'rendered', state }),
+          accessibilityRows: (rows) => this.post(id, { type: 'a11y', rows: [...rows] }),
+          error: (error) => this.reportError(id, error),
+        },
+        message.options.accessibility
+      );
+      const session: WorkerSession = {
+        id,
+        terminal,
+        renderer,
+        pipeline,
         metrics: message.options.metrics,
-        renderPending: false,
-        renderWaiters: [],
-        accessibility: message.options.accessibility,
         fontFaces: [],
         clipboardRegistration: null,
       };
@@ -320,7 +273,7 @@ export class TerminalWorkerHost {
         renderer: renderer.info,
         surfaceIndex: renderer.surfaceIndex,
       });
-      void this.scheduleRender(session);
+      pipeline.scheduleRender();
     } finally {
       terminal?.dispose();
       this.initializingSessionIds.delete(message.terminalId);
@@ -359,89 +312,6 @@ export class TerminalWorkerHost {
     this.runtime.dispose();
     this.runtime = null;
     this.runtimeKey = null;
-  }
-
-  private scheduleRender(
-    session: WorkerSession,
-    compatibility = false,
-    benchmark?: CoreBenchmarkAccumulator
-  ): Promise<XtermCompatibilityUpdate | undefined> {
-    const rendered = new Promise<XtermCompatibilityUpdate | undefined>((resolve, reject) =>
-      session.renderWaiters.push({
-        compatibility,
-        ...(benchmark ? { benchmark } : {}),
-        resolve,
-        reject,
-      })
-    );
-    void rendered.catch(() => undefined);
-    if (session.renderPending) return rendered;
-    session.renderPending = true;
-    const run = async () => {
-      if (!this.sessions.has(session.id)) {
-        session.renderPending = false;
-        for (const waiter of session.renderWaiters.splice(0))
-          waiter.reject(new Error('Terminal worker session was disposed before rendering'));
-        return;
-      }
-      try {
-        const updates: XtermCompatibilityUpdate[] = [];
-        const renderStartedAt = performance.now();
-        while (true) {
-          const iterationStartedAt = performance.now();
-          const iterationWaiters = [...session.renderWaiters];
-          for (const waiter of iterationWaiters) {
-            if (!waiter.benchmark || waiter.benchmark.renderStartedAt !== 0) continue;
-            waiter.benchmark.renderWaitMs = iterationStartedAt - waiter.benchmark.scheduledAt;
-            waiter.benchmark.renderStartedAt = iterationStartedAt;
-          }
-          const waiterCount = session.renderWaiters.length;
-          const frame = session.terminal.render();
-          if (session.renderWaiters.some((waiter) => waiter.compatibility)) {
-            const compatibilityStartedAt = performance.now();
-            updates.push(session.terminal.xtermCompatibilityUpdate());
-            const compatibilityMs = performance.now() - compatibilityStartedAt;
-            for (const waiter of iterationWaiters) {
-              if (waiter.compatibility && waiter.benchmark)
-                waiter.benchmark.compatibilityMs += compatibilityMs;
-            }
-          }
-          await session.renderer.render(frame);
-          if (!this.sessions.has(session.id)) return;
-          if (session.renderWaiters.length === waiterCount) break;
-        }
-        const waiters = session.renderWaiters.splice(0);
-        const renderCompletedAt = performance.now();
-        for (const waiter of waiters) {
-          if (!waiter.benchmark) continue;
-          waiter.benchmark.renderMs =
-            renderCompletedAt - (waiter.benchmark.renderStartedAt || renderStartedAt);
-        }
-        session.renderPending = false;
-        const update = updates.length > 0 ? mergeXtermCompatibilityUpdates(updates) : undefined;
-        const state = update?.state ?? session.terminal.bufferState();
-        this.post(session.id, { type: 'rendered', state });
-        if (session.accessibility) {
-          const viewport = session.terminal.viewport();
-          this.post(session.id, {
-            type: 'a11y',
-            rows: viewport.viewportRows.map((row) => row.text),
-          });
-        }
-        for (const waiter of waiters) waiter.resolve(waiter.compatibility ? update : undefined);
-      } catch (error) {
-        if (!this.sessions.has(session.id)) return;
-        const failure = error instanceof Error ? error : new Error(String(error));
-        const waiters = session.renderWaiters.splice(0);
-        session.renderPending = false;
-        for (const waiter of waiters) waiter.reject(failure);
-        this.reportError(session.id, failure);
-      }
-    };
-    if (typeof this.scope.requestAnimationFrame === 'function')
-      this.scope.requestAnimationFrame(() => void run());
-    else queueMicrotask(() => void run());
-    return rendered;
   }
 
   private forwardEvents(session: WorkerSession): void {

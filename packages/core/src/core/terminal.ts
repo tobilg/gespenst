@@ -1,10 +1,11 @@
-import type { XtermCompatibilityUpdate } from '../internal/xterm-compatibility.js';
+import type { RetainedRowChanges, XtermCompatibilityRow } from '../internal/xterm-compatibility.js';
 import type { Allocation, GhosttyBindings } from './bindings.js';
 import { BufferReader } from './buffer.js';
 import { TypedEventEmitter } from './events.js';
 import { InputEncoder } from './input.js';
 import { PointerController } from './pointer.js';
 import { RenderReader } from './render.js';
+import { SharedRenderState } from './render-state.js';
 import {
   cloneTerminalTheme,
   mergeTerminalTheme,
@@ -38,7 +39,15 @@ import type {
   TerminalTheme,
   ViewportSnapshot,
 } from './types.js';
-import { XtermCompatibilityReader } from './xterm-reader.js';
+
+/** What {@link CoreTerminal.retainedRowChanges} last reported for one screen. */
+interface RetainedScreen {
+  state: TerminalBufferState | null;
+  /** Tracked reference to the last active row, which Ghostty moves when history is pruned. */
+  anchor: number;
+  /** Index of the anchor row when it was captured, or -1 when row identity was lost. */
+  anchorIndex: number;
+}
 
 type Effect =
   | { readonly type: 'input'; readonly data: Uint8Array }
@@ -70,8 +79,8 @@ export interface TerminalHost {
 export class CoreTerminal implements Disposable {
   private handle: number;
   private readonly inputEncoder: InputEncoder;
+  private readonly renderState: SharedRenderState;
   private readonly renderReader: RenderReader;
-  private readonly xtermReader: XtermCompatibilityReader;
   private readonly bufferReader: BufferReader;
   private readonly pointerController: PointerController;
   private readonly events = new TypedEventEmitter<TerminalEventMap>();
@@ -82,9 +91,10 @@ export class CoreTerminal implements Disposable {
   private disposed = false;
   private writing = false;
   private revision = 0;
-  private xtermPreviousState: TerminalBufferState | null = null;
-  private xtermPreviousAnchorId = -1;
-  private xtermPreviousAnchorIndex = -1;
+  private readonly retainedScreens: Record<TerminalBufferState['screen'], RetainedScreen> = {
+    normal: { state: null, anchor: 0, anchorIndex: -1 },
+    alternate: { state: null, anchor: 0, anchorIndex: -1 },
+  };
   private _geometry: TerminalGeometry;
   private readonly host: TerminalHost;
   private clipboardEnabled = false;
@@ -109,8 +119,8 @@ export class CoreTerminal implements Disposable {
       host.bindings.exports.ghostty_terminal_new(0, slot, cols, rows)
     );
     this.inputEncoder = new InputEncoder(host.bindings);
-    this.renderReader = new RenderReader(host.bindings);
-    this.xtermReader = new XtermCompatibilityReader(host.bindings);
+    this.renderState = new SharedRenderState(host.bindings);
+    this.renderReader = new RenderReader(host.bindings, this.renderState);
     this.bufferReader = new BufferReader(host.bindings);
     this.pointerController = new PointerController(host.bindings);
     this._geometry = {
@@ -195,6 +205,7 @@ export class CoreTerminal implements Disposable {
       heightPx: next.rows * next.cellHeightPx,
     };
     this.renderReader.invalidate();
+    this.forgetRetainedRows();
     this.revision += 1;
   }
 
@@ -204,6 +215,7 @@ export class CoreTerminal implements Disposable {
     this.host.bindings.exports.ghostty_terminal_reset(this.handle);
     this.clearClipboardSnapshot();
     this.renderReader.invalidate();
+    this.forgetRetainedRows();
     this.revision += 1;
   }
 
@@ -215,91 +227,52 @@ export class CoreTerminal implements Disposable {
     return frame;
   }
 
-  /** Reads one compact xterm compatibility delta without constructing painter cells. @internal */
-  xtermCompatibilityUpdate(): XtermCompatibilityUpdate {
+  /**
+   * Reports how the active screen's retained rows changed since the previous call for that screen,
+   * so a reader that caches rows by index knows which ones to drop.
+   *
+   * @remarks
+   * Rows keep their index until history is pruned or erased, and output can only change rows that
+   * were in the active area. A tracked reference on the last active row measures how far every
+   * older index moved; Ghostty discards it when its row is pruned, and every older row with it.
+   * Each screen keeps its own reference, so the normal screen is measured across a full-screen app.
+   * @internal
+   */
+  retainedRowChanges(): RetainedRowChanges {
     this.ensureActive();
     const state = this.bufferReader.state(this.handle, this.revision);
-    const packed = this.xtermReader.read(this.handle, state, this.bufferReader);
-    const previous = this.xtermPreviousState;
-    let reset = !previous || previous.screen !== state.screen;
-    let trimmed = 0;
-    if (!reset && previous) {
-      let retainedIndex = -1;
-      const predictedOffset = this.xtermPreviousAnchorIndex - state.viewportY;
-      if (
-        this.xtermPreviousAnchorId >= 0 &&
-        predictedOffset >= 0 &&
-        predictedOffset < state.viewportLength &&
-        this.bufferReader.selectCompatibilityRow(this.handle, state.viewportY + predictedOffset) ===
-          this.xtermPreviousAnchorId
-      )
-        retainedIndex = state.viewportY + predictedOffset;
-      if (retainedIndex < 0 && this.xtermPreviousAnchorId >= 0) {
-        for (let offset = 0; offset < state.viewportLength; offset += 1) {
-          if (offset === predictedOffset) continue;
-          const index = state.viewportY + offset;
-          if (
-            this.bufferReader.selectCompatibilityRow(this.handle, index) !==
-            this.xtermPreviousAnchorId
-          )
-            continue;
-          retainedIndex = index;
-          break;
-        }
-      }
-      if (retainedIndex >= 0) trimmed = Math.max(0, this.xtermPreviousAnchorIndex - retainedIndex);
-      else if (
-        state.totalRows !== previous.totalRows ||
-        state.viewportY !== previous.viewportY ||
-        packed.dirty === 'full'
-      )
-        reset = true;
+    const screen = this.retainedScreens[state.screen];
+    const previous = screen.state;
+    let trimmed = -1;
+    if (previous && screen.anchorIndex >= 0) {
+      const index = this.bufferReader.trackedRow(screen.anchor);
+      if (index >= 0 && index <= screen.anchorIndex) trimmed = screen.anchorIndex - index;
     }
-    const appended = reset
-      ? state.totalRows
-      : Math.max(0, state.totalRows - (previous?.totalRows ?? 0) + trimmed);
-    const appendStart = Math.max(0, state.totalRows - appended);
-    this.xtermPreviousState = state;
-    this.captureXtermAnchor(state);
-    const rows = [...packed.rows];
-    const requiredStart = reset ? 0 : appendStart;
-    if (requiredStart < state.totalRows) {
-      const present = new Set(rows.map((row) => row.index));
-      let missingStart = -1;
-      for (let index = requiredStart; index <= state.totalRows; index += 1) {
-        if (index < state.totalRows && !present.has(index)) {
-          if (missingStart < 0) missingStart = index;
-          continue;
-        }
-        if (missingStart < 0) continue;
-        rows.push(...this.bufferReader.compatibilityRows(this.handle, missingStart, index));
-        missingStart = -1;
-      }
-      rows.sort((left, right) => left.index - right.index);
+    screen.state = state;
+    screen.anchorIndex = -1;
+    if (state.totalRows > 0) {
+      screen.anchor = this.bufferReader.trackRow(this.handle, state.totalRows - 1, screen.anchor);
+      if (screen.anchor !== 0) screen.anchorIndex = state.totalRows - 1;
     }
-    return {
-      state,
-      dirty: packed.dirty,
-      trimmed,
-      appendStart,
-      reset,
-      rows,
-    };
+    if (!previous || trimmed < 0) return { state, trimmed: 0, reset: true, dirtyFrom: 0 };
+    const dirtyFrom = Math.max(0, Math.min(state.totalRows, previous.scrollbackRows - trimmed));
+    return { state, trimmed, reset: false, dirtyFrom };
   }
 
-  /** Captures the authoritative pre-write anchor used by the xterm compatibility journal. */
-  beginXtermCompatibilityBatch(): void {
+  /** Reads retained rows in the packed xterm cell format. @internal */
+  xtermRows(start: number, end: number): readonly XtermCompatibilityRow[] {
     this.ensureActive();
-    const state = this.bufferReader.state(this.handle, this.revision);
-    this.xtermPreviousState = state;
-    this.captureXtermAnchor(state);
+    return this.bufferReader.compatibilityRows(this.handle, start, end);
   }
 
-  private captureXtermAnchor(state: TerminalBufferState): void {
-    const index = state.viewportY + state.viewportLength - 1;
-    this.xtermPreviousAnchorIndex = index;
-    this.xtermPreviousAnchorId =
-      state.viewportLength > 0 ? this.bufferReader.selectCompatibilityRow(this.handle, index) : -1;
+  /** Makes the next {@link retainedRowChanges} call report a reset for both screens. */
+  private forgetRetainedRows(release = false): void {
+    for (const screen of Object.values(this.retainedScreens)) {
+      screen.anchorIndex = -1;
+      if (!release) continue;
+      this.bufferReader.releaseTrackedRow(screen.anchor);
+      screen.anchor = 0;
+    }
   }
 
   /** Reads a complete visible viewport snapshot. */
@@ -573,10 +546,16 @@ export class CoreTerminal implements Disposable {
     this.ensureActive();
     const selection = this.host.bindings.allocType('GhosttySelection', true);
     try {
-      this.host.bindings.check(
-        this.host.bindings.exports.ghostty_terminal_select_all(this.handle, selection.pointer),
-        'select all'
+      const result = this.host.bindings.exports.ghostty_terminal_select_all(
+        this.handle,
+        selection.pointer
       );
+      // An empty terminal has nothing to select.
+      if (result === this.host.bindings.abi.value('GhosttyResult', 'NO_VALUE')) {
+        this.clearSelection();
+        return;
+      }
+      this.host.bindings.check(result, 'select all');
       this.setOption('SELECTION', selection.pointer);
     } finally {
       selection.free();
@@ -721,6 +700,8 @@ export class CoreTerminal implements Disposable {
     this.configure();
     this.syncGeometry();
     this.renderReader.invalidate();
+    // A tracked reference belongs to the terminal handle that created it.
+    this.forgetRetainedRows(true);
     this.revision += 1;
   }
 
@@ -732,7 +713,8 @@ export class CoreTerminal implements Disposable {
     this.host.unregister(this.id);
     this.inputEncoder.dispose();
     this.renderReader.dispose();
-    this.xtermReader.dispose();
+    this.renderState.dispose();
+    this.forgetRetainedRows(true);
     this.bufferReader.dispose();
     this.pointerController.dispose(this.handle);
     this.host.bindings.exports.ghostty_terminal_free(this.handle);

@@ -31,19 +31,16 @@ import type {
   ViewportSnapshot,
 } from './core/types.js';
 import {
-  type CoreBenchmarkAccumulator,
   type CoreBenchmarkTiming,
   type CoreTerminalBenchmarkHooks,
   coreBenchmarkTiming,
   TERMINAL_BENCHMARK_HOOKS,
 } from './internal/benchmark.js';
+import { RenderPipeline, startBenchmark } from './internal/render-pipeline.js';
+import { RetainedBuffer } from './internal/retained-buffer.js';
 import {
-  coalesceXtermCompatibilityBatch,
-  mergeXtermCompatibilityUpdates,
   XTERM_COMPATIBILITY_BRIDGE,
-  type XtermCompatibilityBatch,
   type XtermCompatibilityBridge,
-  type XtermCompatibilityUpdate,
 } from './internal/xterm-compatibility.js';
 import {
   type MainToWorkerPayload,
@@ -83,19 +80,11 @@ interface BackendEvents {
 
 interface Backend {
   readonly renderer: RendererInfo;
+  /** Synchronous row access for terminals that run on the main thread. */
+  readonly retained: RetainedBuffer | null;
   write(data: Uint8Array): void;
   writeAsync(data: Uint8Array): Promise<void>;
   writeMeasured(data: Uint8Array): Promise<CoreBenchmarkTiming>;
-  writeCompatibilityAsync(
-    data: Uint8Array,
-    owned: boolean,
-    boundaries: Uint32Array
-  ): Promise<XtermCompatibilityBatch>;
-  writeCompatibilityMeasured(
-    data: Uint8Array,
-    owned: boolean,
-    boundaries: Uint32Array
-  ): Promise<{ readonly batch: XtermCompatibilityBatch; readonly timing: CoreBenchmarkTiming }>;
   resize(cols: number, rows: number, metrics: RenderMetrics): void;
   key(input: KeyInput): void;
   pointer(input: PointerInput): void;
@@ -229,24 +218,75 @@ function sameWasmSource(left: unknown, rightValue: unknown): boolean {
   return leftBytes.every((value, index) => value === rightBytes[index]);
 }
 
+interface SharedRuntime {
+  readonly runtime: Promise<CoreRuntime>;
+  references: number;
+  readonly wasm: unknown;
+  readonly callbacksWasm: unknown;
+}
+
+const sharedRuntimes: SharedRuntime[] = [];
+
+/** Shares one main-thread Ghostty runtime among terminals loaded from the same WASM sources. */
+async function acquireRuntime(
+  wasm: TerminalOptions['wasm'],
+  callbacksWasm: TerminalOptions['callbacksWasm']
+): Promise<{ readonly runtime: CoreRuntime; release(): void }> {
+  let shared = sharedRuntimes.find(
+    (entry) =>
+      sameWasmSource(entry.wasm, wasm) && sameWasmSource(entry.callbacksWasm, callbacksWasm)
+  );
+  if (!shared) {
+    const entry: SharedRuntime = {
+      runtime: createCoreRuntime({
+        ...(wasm ? { wasm } : {}),
+        ...(callbacksWasm ? { callbacksWasm } : {}),
+      }),
+      references: 0,
+      wasm: canonicalWasmSource(wasm),
+      callbacksWasm: canonicalWasmSource(callbacksWasm),
+    };
+    sharedRuntimes.push(entry);
+    // A failed load is not cached, so a later terminal can retry.
+    entry.runtime.catch(() => removeSharedRuntime(entry));
+    shared = entry;
+  }
+  const entry = shared;
+  entry.references += 1;
+  let runtime: CoreRuntime;
+  try {
+    runtime = await entry.runtime;
+  } catch (error) {
+    entry.references -= 1;
+    throw error;
+  }
+  let released = false;
+  return {
+    runtime,
+    release() {
+      if (released) return;
+      released = true;
+      entry.references -= 1;
+      if (entry.references > 0) return;
+      removeSharedRuntime(entry);
+      runtime.dispose();
+    },
+  };
+}
+
+function removeSharedRuntime(entry: SharedRuntime): void {
+  const index = sharedRuntimes.indexOf(entry);
+  if (index >= 0) sharedRuntimes.splice(index, 1);
+}
+
 function cloneSafeWasmSource(
   source: TerminalOptions['wasm']
 ): WorkerInitOptions['wasm'] | undefined {
   return source instanceof URL ? source.href : source;
 }
 
-function* compatibilityRanges(data: Uint8Array, boundaries: Uint32Array): Generator<Uint8Array> {
-  let start = 0;
-  for (const rawEnd of boundaries) {
-    const end = Math.min(data.byteLength, Math.max(start, rawEnd));
-    if (end > start) yield data.subarray(start, end);
-    start = end;
-  }
-  if (start < data.byteLength) yield data.subarray(start);
-  if (data.byteLength === 0 && boundaries.length === 0) yield data;
-}
-
 class WorkerBackend implements Backend {
+  readonly retained = null;
   private rendererValue: RendererInfo;
   private nextRequest = 1;
   private failure: Error | null = null;
@@ -401,58 +441,6 @@ class WorkerBackend implements Backend {
       (requestId) => ({ type: 'write', data: value, requestId, benchmark: true }),
       [value]
     ).then(({ timing }) => timing);
-  }
-
-  writeCompatibilityAsync(
-    data: Uint8Array,
-    owned: boolean,
-    boundaries: Uint32Array
-  ): Promise<XtermCompatibilityBatch> {
-    const value =
-      owned &&
-      data.byteOffset === 0 &&
-      data.buffer instanceof ArrayBuffer &&
-      data.byteLength === data.buffer.byteLength
-        ? data.buffer
-        : data.slice().buffer;
-    const boundaryData = boundaries.slice().buffer;
-    return this.request<XtermCompatibilityBatch>(
-      (requestId) => ({
-        type: 'write',
-        data: value,
-        requestId,
-        compatibilityBoundaries: boundaryData,
-      }),
-      [value, boundaryData]
-    );
-  }
-
-  writeCompatibilityMeasured(
-    data: Uint8Array,
-    owned: boolean,
-    boundaries: Uint32Array
-  ): Promise<{ readonly batch: XtermCompatibilityBatch; readonly timing: CoreBenchmarkTiming }> {
-    const value =
-      owned &&
-      data.byteOffset === 0 &&
-      data.buffer instanceof ArrayBuffer &&
-      data.byteLength === data.buffer.byteLength
-        ? data.buffer
-        : data.slice().buffer;
-    const boundaryData = boundaries.slice().buffer;
-    return this.request<{
-      readonly batch: XtermCompatibilityBatch;
-      readonly timing: CoreBenchmarkTiming;
-    }>(
-      (requestId) => ({
-        type: 'write',
-        data: value,
-        requestId,
-        compatibilityBoundaries: boundaryData,
-        benchmark: true,
-      }),
-      [value, boundaryData]
-    );
   }
 
   resize(cols: number, rows: number, metrics: RenderMetrics): void {
@@ -616,14 +604,7 @@ class WorkerBackend implements Backend {
     else if (message.type === 'buffer') this.resolve(message.requestId, message.value);
     else if (message.type === 'fontLoaded') this.resolve(message.requestId, undefined);
     else if (message.type === 'written')
-      this.resolve(
-        message.requestId,
-        message.timing
-          ? message.batch
-            ? { batch: message.batch, timing: message.timing }
-            : { timing: message.timing }
-          : message.batch
-      );
+      this.resolve(message.requestId, message.timing ? { timing: message.timing } : undefined);
     else if (message.type === 'restored') this.resolve(message.requestId, undefined);
     else if (message.type === 'themed') this.resolve(message.requestId, undefined);
     else if (message.type === 'clipboardEnabled') this.resolve(message.requestId, undefined);
@@ -679,33 +660,38 @@ class WorkerBackend implements Backend {
 }
 
 class LocalBackend implements Backend {
-  private renderPending = false;
+  readonly retained: RetainedBuffer;
   private disposed = false;
-  private readonly renderWaiters: Array<{
-    readonly compatibility: boolean;
-    readonly benchmark?: CoreBenchmarkAccumulator;
-    readonly resolve: (update: XtermCompatibilityUpdate | undefined) => void;
-    readonly reject: (error: Error) => void;
-  }> = [];
-  private readonly runtime: CoreRuntime;
   private readonly terminal: CoreTerminal;
+  private readonly releaseRuntime: () => void;
   private readonly painter: HybridRenderer;
-  private readonly events: BackendEvents;
-  private accessibility: boolean;
+  private readonly pipeline: RenderPipeline;
   private clipboardRegistration: Disposable | null = null;
 
   private constructor(
     runtime: CoreRuntime,
+    releaseRuntime: () => void,
     terminal: CoreTerminal,
     painter: HybridRenderer,
     events: BackendEvents,
     accessibility: boolean
   ) {
-    this.runtime = runtime;
     this.terminal = terminal;
+    this.releaseRuntime = releaseRuntime;
     this.painter = painter;
-    this.events = events;
-    this.accessibility = accessibility;
+    this.retained = new RetainedBuffer(runtime, terminal);
+    this.pipeline = new RenderPipeline(
+      terminal,
+      painter,
+      {
+        schedule: (callback) => requestAnimationFrame(callback),
+        isActive: () => !this.disposed,
+        rendered: events.rendered,
+        accessibilityRows: (rows) => events.a11y(rows),
+        error: events.error,
+      },
+      accessibility
+    );
   }
 
   static async create(
@@ -714,26 +700,24 @@ class LocalBackend implements Backend {
     options: TerminalOptions,
     events: BackendEvents
   ): Promise<LocalBackend> {
-    const runtime = await createCoreRuntime({
-      ...(options.wasm ? { wasm: options.wasm } : {}),
-      ...(options.callbacksWasm ? { callbacksWasm: options.callbacksWasm } : {}),
-    });
-    const terminal = runtime.createTerminal({
-      cols: layout.cols,
-      rows: layout.rows,
-      cellWidthPx: layout.metrics.cellWidth,
-      cellHeightPx: layout.metrics.cellHeight,
-      ...(options.scrollbackLines === undefined
-        ? {}
-        : { scrollbackLines: options.scrollbackLines }),
-      ...(options.theme ? { theme: options.theme } : {}),
-      ...(options.defaultCursorStyle ? { defaultCursorStyle: options.defaultCursorStyle } : {}),
-      ...(options.defaultCursorBlink === undefined
-        ? {}
-        : { defaultCursorBlink: options.defaultCursorBlink }),
-    });
+    const { runtime, release } = await acquireRuntime(options.wasm, options.callbacksWasm);
+    let terminal: CoreTerminal | null = null;
     let painter: HybridRenderer;
     try {
+      terminal = runtime.createTerminal({
+        cols: layout.cols,
+        rows: layout.rows,
+        cellWidthPx: layout.metrics.cellWidth,
+        cellHeightPx: layout.metrics.cellHeight,
+        ...(options.scrollbackLines === undefined
+          ? {}
+          : { scrollbackLines: options.scrollbackLines }),
+        ...(options.theme ? { theme: options.theme } : {}),
+        ...(options.defaultCursorStyle ? { defaultCursorStyle: options.defaultCursorStyle } : {}),
+        ...(options.defaultCursorBlink === undefined
+          ? {}
+          : { defaultCursorBlink: options.defaultCursorBlink }),
+      });
       painter = await HybridRenderer.create(
         dom.backgrounds,
         dom.text,
@@ -743,13 +727,14 @@ class LocalBackend implements Backend {
         options.minimumContrastRatio ?? 1
       );
     } catch (error) {
-      terminal.dispose();
-      runtime.dispose();
+      terminal?.dispose();
+      release();
       throw error;
     }
     activateBackgroundSurface(dom, painter.surfaceIndex);
     const backend = new LocalBackend(
       runtime,
+      release,
       terminal,
       painter,
       events,
@@ -772,7 +757,7 @@ class LocalBackend implements Backend {
       terminal.on(name, (value) => events.event(name, value));
     }
     terminal.on('error', events.error);
-    backend.scheduleRender();
+    backend.pipeline.scheduleRender();
     return backend;
   }
 
@@ -781,74 +766,39 @@ class LocalBackend implements Backend {
   }
 
   write(data: Uint8Array): void {
-    this.terminal.write(data);
-    this.scheduleRender();
+    this.pipeline.write(data);
+    this.retained.changed();
   }
   async writeAsync(data: Uint8Array): Promise<void> {
-    this.terminal.write(data);
-    await this.scheduleRender();
+    const rendered = this.pipeline.write(data);
+    this.retained.changed();
+    await rendered;
   }
   async writeMeasured(data: Uint8Array): Promise<CoreBenchmarkTiming> {
-    const benchmark = this.startBenchmark();
-    const parseStartedAt = performance.now();
-    this.terminal.write(data);
-    benchmark.parseMs = performance.now() - parseStartedAt;
-    benchmark.scheduledAt = performance.now();
-    await this.scheduleRender(false, benchmark);
+    const benchmark = startBenchmark();
+    const rendered = this.pipeline.write(data, benchmark);
+    this.retained.changed();
+    await rendered;
     return coreBenchmarkTiming(benchmark);
-  }
-  async writeCompatibilityAsync(
-    data: Uint8Array,
-    _owned: boolean,
-    boundaries: Uint32Array
-  ): Promise<XtermCompatibilityBatch> {
-    const updates: XtermCompatibilityUpdate[] = [];
-    this.terminal.beginXtermCompatibilityBatch();
-    for (const part of compatibilityRanges(data, boundaries)) {
-      this.terminal.write(part);
-      updates.push(this.terminal.xtermCompatibilityUpdate());
-    }
-    this.scheduleRender();
-    return coalesceXtermCompatibilityBatch(updates);
-  }
-  async writeCompatibilityMeasured(
-    data: Uint8Array,
-    _owned: boolean,
-    boundaries: Uint32Array
-  ): Promise<{ readonly batch: XtermCompatibilityBatch; readonly timing: CoreBenchmarkTiming }> {
-    const benchmark = this.startBenchmark();
-    const updates: XtermCompatibilityUpdate[] = [];
-    this.terminal.beginXtermCompatibilityBatch();
-    for (const part of compatibilityRanges(data, boundaries)) {
-      const parseStartedAt = performance.now();
-      this.terminal.write(part);
-      benchmark.parseMs += performance.now() - parseStartedAt;
-      const compatibilityStartedAt = performance.now();
-      updates.push(this.terminal.xtermCompatibilityUpdate());
-      benchmark.compatibilityMs += performance.now() - compatibilityStartedAt;
-    }
-    benchmark.scheduledAt = performance.now();
-    this.scheduleRender();
-    return {
-      batch: coalesceXtermCompatibilityBatch(updates),
-      timing: coreBenchmarkTiming(benchmark),
-    };
   }
   resize(cols: number, rows: number, metrics: RenderMetrics): void {
     this.terminal.resize(cols, rows, metrics.cellWidth, metrics.cellHeight);
     this.painter.resize(metrics);
-    this.scheduleRender();
+    this.pipeline.scheduleRender();
+    this.retained.changed();
   }
   key(input: KeyInput): void {
     this.terminal.key(input);
   }
   pointer(input: PointerInput): void {
     this.terminal.pointer(input);
-    this.scheduleRender();
+    this.pipeline.scheduleRender();
+    this.retained.changed();
   }
   wheel(input: PointerInput, lines: number): void {
     this.terminal.wheel(input, lines);
-    this.scheduleRender();
+    this.pipeline.scheduleRender();
+    this.retained.changed();
   }
   text(data: string): void {
     this.terminal.text(data);
@@ -875,15 +825,16 @@ class LocalBackend implements Backend {
     if (delta === 'top') this.terminal.scrollToTop();
     else if (delta === 'bottom') this.terminal.scrollToBottom();
     else this.terminal.scrollLines(delta);
-    this.scheduleRender();
+    this.pipeline.scheduleRender();
+    this.retained.changed();
   }
   selectAll(): void {
     this.terminal.selectAll();
-    this.scheduleRender();
+    this.pipeline.scheduleRender();
   }
   clearSelection(): void {
     this.terminal.clearSelection();
-    this.scheduleRender();
+    this.pipeline.scheduleRender();
   }
   async getSelection(): Promise<string> {
     return this.terminal.getSelection();
@@ -892,137 +843,52 @@ class LocalBackend implements Backend {
     return this.terminal.snapshot();
   }
   async viewport(): Promise<ViewportSnapshot> {
-    if (this.renderPending) await this.scheduleRender();
+    if (this.pipeline.pending) await this.pipeline.scheduleRender();
     return this.terminal.viewport();
   }
   async buffer(range?: TerminalBufferRange): Promise<TerminalBufferSnapshot> {
-    if (this.renderPending) await this.scheduleRender();
+    if (this.pipeline.pending) await this.pipeline.scheduleRender();
     return this.terminal.readBuffer(range);
   }
   async loadFont(_face: TerminalFontFace): Promise<void> {}
   async restore(data: Uint8Array): Promise<void> {
     this.terminal.restore(data);
-    this.scheduleRender();
+    this.pipeline.scheduleRender();
+    this.retained.changed();
   }
   async setTheme(theme: TerminalTheme): Promise<void> {
     await this.terminal.setTheme(theme);
-    await this.scheduleRender();
+    await this.pipeline.scheduleRender();
   }
   setScrollbackLines(lines: number): void {
     this.terminal.setScrollbackLines(lines);
-    this.scheduleRender();
+    this.pipeline.scheduleRender();
+    this.retained.changed();
   }
   setDefaultCursor(style: import('./core/types.js').CursorStyle, blink: boolean): void {
     this.terminal.setDefaultCursor(style, blink);
-    this.scheduleRender();
+    this.pipeline.scheduleRender();
   }
   setAccessibility(enabled: boolean): void {
-    this.accessibility = enabled;
+    this.pipeline.accessibility = enabled;
   }
   setMinimumContrastRatio(ratio: number): void {
     this.painter.setMinimumContrastRatio(ratio);
   }
   reset(): void {
     this.terminal.reset();
-    this.scheduleRender();
+    this.pipeline.scheduleRender();
+    this.retained.changed();
   }
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    this.renderPending = false;
-    for (const waiter of this.renderWaiters.splice(0))
-      waiter.reject(new Error('Terminal disposed'));
+    this.pipeline.dispose();
     this.disableClipboard();
     this.painter.dispose();
-    this.runtime.dispose();
-  }
-
-  private scheduleRender(
-    compatibility = false,
-    benchmark?: CoreBenchmarkAccumulator
-  ): Promise<XtermCompatibilityUpdate | undefined> {
-    const rendered = new Promise<XtermCompatibilityUpdate | undefined>((resolve, reject) =>
-      this.renderWaiters.push({
-        compatibility,
-        ...(benchmark ? { benchmark } : {}),
-        resolve,
-        reject,
-      })
-    );
-    // Most mutations schedule opportunistically; keep their disposal rejection observed while
-    // preserving rejection for callers that explicitly await the returned boundary.
-    void rendered.catch(() => undefined);
-    if (this.renderPending) return rendered;
-    this.renderPending = true;
-    requestAnimationFrame(() => void this.renderFrame());
-    return rendered;
-  }
-
-  private async renderFrame(): Promise<void> {
-    if (this.disposed) return;
-    try {
-      const updates: XtermCompatibilityUpdate[] = [];
-      const renderStartedAt = performance.now();
-      while (true) {
-        const iterationStartedAt = performance.now();
-        const iterationWaiters = [...this.renderWaiters];
-        for (const waiter of iterationWaiters) {
-          if (!waiter.benchmark || waiter.benchmark.renderStartedAt !== 0) continue;
-          waiter.benchmark.renderWaitMs = iterationStartedAt - waiter.benchmark.scheduledAt;
-          waiter.benchmark.renderStartedAt = iterationStartedAt;
-        }
-        const waiterCount = this.renderWaiters.length;
-        const frame = this.terminal.render();
-        if (this.renderWaiters.some((waiter) => waiter.compatibility)) {
-          const compatibilityStartedAt = performance.now();
-          updates.push(this.terminal.xtermCompatibilityUpdate());
-          const compatibilityMs = performance.now() - compatibilityStartedAt;
-          for (const waiter of iterationWaiters) {
-            if (waiter.compatibility && waiter.benchmark)
-              waiter.benchmark.compatibilityMs += compatibilityMs;
-          }
-        }
-        await this.painter.render(frame);
-        if (this.disposed) return;
-        // A write may arrive while an asynchronous renderer recovery is in progress. Render the
-        // resulting damage before resolving any writeAsync() boundary that joined this frame.
-        if (this.renderWaiters.length === waiterCount) break;
-      }
-      const waiters = this.renderWaiters.splice(0);
-      const renderCompletedAt = performance.now();
-      for (const waiter of waiters) {
-        if (!waiter.benchmark) continue;
-        waiter.benchmark.renderMs =
-          renderCompletedAt - (waiter.benchmark.renderStartedAt || renderStartedAt);
-      }
-      this.renderPending = false;
-      const update = updates.length > 0 ? mergeXtermCompatibilityUpdates(updates) : undefined;
-      this.events.rendered(update?.state ?? this.terminal.bufferState());
-      if (this.accessibility) {
-        const viewport = this.terminal.viewport();
-        this.events.a11y(viewport.viewportRows.map((row) => row.text));
-      }
-      for (const waiter of waiters) waiter.resolve(waiter.compatibility ? update : undefined);
-    } catch (error) {
-      if (this.disposed) return;
-      const failure = error instanceof Error ? error : new Error(String(error));
-      const waiters = this.renderWaiters.splice(0);
-      this.renderPending = false;
-      for (const waiter of waiters) waiter.reject(failure);
-      this.events.error(failure);
-    }
-  }
-
-  private startBenchmark(): CoreBenchmarkAccumulator {
-    return {
-      parseMs: 0,
-      scheduledAt: 0,
-      renderWaitMs: 0,
-      renderMs: 0,
-      compatibilityMs: 0,
-      backendStartedAt: performance.now(),
-      renderStartedAt: 0,
-    };
+    this.retained.dispose();
+    this.terminal.dispose();
+    this.releaseRuntime();
   }
 }
 
@@ -1068,28 +934,7 @@ export class GespenstTerminal implements BrowserTerminal {
   >();
 
   /** @internal Runtime-only capability used by the version-matched xterm adapter. */
-  readonly [XTERM_COMPATIBILITY_BRIDGE]: XtermCompatibilityBridge = {
-    onInput: (listener) => {
-      this.compatibilityInputListeners.add(listener);
-      return { dispose: () => this.compatibilityInputListeners.delete(listener) };
-    },
-    writeAsync: async (data, owned, boundaries) => {
-      this.ensureActive();
-      const batch = await this.backend.writeCompatibilityAsync(data, owned, boundaries);
-      this.ensureActive();
-      this.events.emit('writeParsed', undefined);
-      this.events.emit('bufferChange', { reason: 'write' });
-      return batch;
-    },
-    writeMeasured: async (data, owned, boundaries) => {
-      this.ensureActive();
-      const result = await this.backend.writeCompatibilityMeasured(data, owned, boundaries);
-      this.ensureActive();
-      this.events.emit('writeParsed', undefined);
-      this.events.emit('bufferChange', { reason: 'write' });
-      return result;
-    },
-  };
+  readonly [XTERM_COMPATIBILITY_BRIDGE]: XtermCompatibilityBridge;
 
   private constructor(
     dom: TerminalDom,
@@ -1114,6 +959,33 @@ export class GespenstTerminal implements BrowserTerminal {
     };
     this.events = events;
     this.element = dom.root;
+    const retained = backend.retained;
+    this[XTERM_COMPATIBILITY_BRIDGE] = {
+      onInput: (listener) => {
+        this.compatibilityInputListeners.add(listener);
+        return { dispose: () => this.compatibilityInputListeners.delete(listener) };
+      },
+      open: async (container) => {
+        this.ensureActive();
+        container.append(this.dom.root);
+        await this.element.ownerDocument.fonts?.ready;
+        this.resize();
+      },
+      buffer: retained && {
+        write: (data) => {
+          this.ensureActive();
+          this.backend.write(data);
+          this.events.emit('writeParsed', undefined);
+          this.events.emit('bufferChange', { reason: 'write' });
+        },
+        state: () => retained.state(),
+        rows: (start, end) => retained.rows(start, end),
+        changes: () => retained.changes(),
+        normalState: () => retained.normalState(),
+        normalRows: (start, end) => retained.normalRows(start, end),
+        onChange: (listener) => retained.onChange(listener),
+      },
+    };
     const benchmarkHooks: CoreTerminalBenchmarkHooks = {
       write: async (data) => {
         this.ensureActive();

@@ -9,8 +9,6 @@ export interface CoreBenchmarkTiming {
   readonly renderWaitMs: number;
   /** Time spent producing and submitting the rendered frame. */
   readonly renderMs: number;
-  /** Time spent extracting the optional xterm compatibility delta. */
-  readonly compatibilityMs: number;
   /** Total execution-context time from parse start through renderer completion. */
   readonly backendMs: number;
 }
@@ -21,7 +19,6 @@ export interface CoreBenchmarkAccumulator {
   scheduledAt: number;
   renderWaitMs: number;
   renderMs: number;
-  compatibilityMs: number;
   backendStartedAt: number;
   renderStartedAt: number;
 }
@@ -42,7 +39,6 @@ export function coreBenchmarkTiming(value: CoreBenchmarkAccumulator): CoreBenchm
     parseMs: value.parseMs,
     renderWaitMs: value.renderWaitMs,
     renderMs: value.renderMs,
-    compatibilityMs: value.compatibilityMs,
     backendMs: performance.now() - value.backendStartedAt,
   };
 }

@@ -35,6 +35,60 @@ export interface AbiManifest {
   readonly types: Readonly<Record<string, AbiType>>;
 }
 
+/** A bit field prepared for decoding many values, with its mask computed once. */
+export interface PackedBitField {
+  readonly lsb: number;
+  readonly width: number;
+  readonly mask: number;
+}
+
+/** Prepares an ABI bit field for {@link packedBits}. */
+export function packedBitField(field: AbiBitField): PackedBitField {
+  return { lsb: field.lsb, width: field.width, mask: 2 ** field.width - 1 };
+}
+
+/** Reads one bit field from a 64-bit ABI value split into its low and high 32-bit words. */
+export function packedBits(low: number, high: number, field: PackedBitField): number {
+  const { lsb, mask } = field;
+  if (lsb >= 32) return (high >>> (lsb - 32)) & mask;
+  if (lsb + field.width <= 32) return (low >>> lsb) & mask;
+  return ((low >>> lsb) | (high << (32 - lsb))) & mask;
+}
+
+/** Bit fields of a raw `GhosttyCell`, prepared for decoding many cells. */
+export interface CellBitFields {
+  readonly contentTag: PackedBitField;
+  readonly content: PackedBitField;
+  readonly codepoint: PackedBitField;
+  readonly styleId: PackedBitField;
+  readonly wide: PackedBitField;
+  readonly hyperlink: PackedBitField;
+  readonly semanticContent: PackedBitField;
+  readonly tagCodepoint: number;
+  readonly tagGrapheme: number;
+}
+
+/** Returns the `GhosttyCell` bit fields used to decode raw cells. */
+export function cellBitFields(abi: GhosttyAbi): CellBitFields {
+  const bit = (name: string) => packedBitField(abi.bit('GhosttyCell', name));
+  return {
+    contentTag: bit('content_tag'),
+    content: bit('content'),
+    codepoint: packedBitField(abi.bit('GhosttyCell', 'content', 'CODEPOINT', 'codepoint')),
+    styleId: bit('style_id'),
+    wide: bit('wide'),
+    hyperlink: bit('hyperlink'),
+    semanticContent: bit('semantic_content'),
+    tagCodepoint: abi.value('GhosttyCellContentTag', 'CODEPOINT'),
+    tagGrapheme: abi.value('GhosttyCellContentTag', 'CODEPOINT_GRAPHEME'),
+  };
+}
+
+/** Reads the codepoint held in a raw cell's content field, whatever its content tag. */
+export function cellCodepoint(low: number, high: number, bits: CellBitFields): number {
+  return (packedBits(low, high, bits.content) >>> bits.codepoint.lsb) & bits.codepoint.mask;
+}
+
 /** Thrown when a Ghostty WASM build has an incompatible or incomplete ABI manifest. */
 export class UnsupportedGhosttyAbiError extends Error {
   /** Stable error name. */

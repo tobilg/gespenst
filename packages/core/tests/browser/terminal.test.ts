@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createTerminal, type GespenstTerminal, type TerminalGeometry } from '../../src';
 import { createCoreRuntime } from '../../src/core';
+import {
+  XTERM_CELL_WORDS,
+  XTERM_COMPATIBILITY_BRIDGE,
+  type XtermBufferSource,
+  type XtermCompatibilityBridge,
+  type XtermCompatibilityRow,
+} from '../../src/internal/xterm-compatibility.js';
 
 const terminals: GespenstTerminal[] = [];
 
@@ -48,6 +55,37 @@ describe('browser terminal', () => {
     );
     expect(reasons.filter((reason) => reason === 'write')).toHaveLength(2);
     expect(reasons).toHaveLength(beforeScroll);
+  });
+
+  it('serves retained rows synchronously on the main thread, including native writes', async () => {
+    const options = { worker: false, renderer: 'canvas2d', cols: 10, rows: 2 } as const;
+    const first = await createTerminal({ container: container(), ...options });
+    const second = await createTerminal({ container: container(), ...options });
+    terminals.push(first, second);
+    const source = retainedSource(second);
+    let changes = 0;
+    source.onChange(() => {
+      changes += 1;
+    });
+
+    source.write(new TextEncoder().encode('one\r\ntwo\r\nthree'));
+    second.write('\r\nfour');
+    second.scrollToTop();
+    expect(changes).toBe(3);
+    const state = source.state();
+    expect(state).toMatchObject({ totalRows: 4, scrollbackRows: 2, viewportY: 0 });
+    expect(source.rows(0, state.totalRows).map(rowText)).toEqual(['one', 'two', 'three', 'four']);
+    expect(source.changes()).toMatchObject({ reset: true, trimmed: 0 });
+    expect(source.changes()).toMatchObject({ reset: false, trimmed: 0, dirtyFrom: 2 });
+
+    // Main-thread terminals share one runtime; disposing one leaves the other working.
+    first.dispose();
+    second.write('\r\nfive');
+    expect(source.rows(4, 5).map(rowText)).toEqual(['five']);
+
+    const worker = await createTerminal({ container: container(), ...options, worker: true });
+    terminals.push(worker);
+    expect(compatibilityBridge(worker).buffer).toBeNull();
   });
 
   it('renders and accepts input on the main-thread fallback', async () => {
@@ -612,6 +650,29 @@ describe('browser terminal', () => {
     await pageScroll;
   });
 });
+
+function compatibilityBridge(terminal: GespenstTerminal): XtermCompatibilityBridge {
+  const bridge = (terminal as unknown as Record<symbol, XtermCompatibilityBridge | undefined>)[
+    XTERM_COMPATIBILITY_BRIDGE
+  ];
+  if (!bridge) throw new Error('Core compatibility bridge is unavailable');
+  return bridge;
+}
+
+function retainedSource(terminal: GespenstTerminal): XtermBufferSource {
+  const source = compatibilityBridge(terminal).buffer;
+  if (!source) throw new Error('Main-thread terminals expose a retained buffer');
+  return source;
+}
+
+function rowText(row: XtermCompatibilityRow): string {
+  let text = '';
+  for (let offset = 0; offset < row.cells.length; offset += XTERM_CELL_WORDS) {
+    const codepoint = (row.cells[offset] ?? 0) & 0x1fffff;
+    text += codepoint ? String.fromCodePoint(codepoint) : ' ';
+  }
+  return text.trimEnd();
+}
 
 function waitForViewport(terminal: GespenstTerminal, position: number): Promise<void> {
   return new Promise((resolve) => {

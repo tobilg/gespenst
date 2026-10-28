@@ -685,6 +685,7 @@ export class HybridRenderer {
   private orderIndex: number;
   private surfaceIndexValue: number;
   private metrics: RenderMetrics;
+  private surfacesSized = false;
   private lastFrame: ViewportSnapshot | null = null;
   private readonly rowCache = new Map<number, RenderRow>();
   private lastCursorRow: number | null = null;
@@ -798,11 +799,10 @@ export class HybridRenderer {
     this.rendererErrorHandler = handler;
   }
 
+  /** Records new metrics; the surfaces are resized when the next frame paints. */
   resize(metrics: RenderMetrics): void {
     this.metrics = metrics;
-    this.background.resize(metrics.width, metrics.height);
-    this.textCanvas.width = metrics.width;
-    this.textCanvas.height = metrics.height;
+    this.surfacesSized = false;
     this.rowCache.clear();
     this.lastCursorRow = null;
   }
@@ -956,6 +956,14 @@ export class HybridRenderer {
   }
 
   private paint(frame: ViewportSnapshot, damage: ReadonlySet<number>): void {
+    // Sizing a surface clears it and reconfigures its context, so a burst of resizes applies
+    // only the last one.
+    if (!this.surfacesSized) {
+      this.surfacesSized = true;
+      this.background.resize(this.metrics.width, this.metrics.height);
+      this.textCanvas.width = this.metrics.width;
+      this.textCanvas.height = this.metrics.height;
+    }
     this.background.render(frame, this.metrics, this.blinkVisible, this.focused);
     const ctx = this.text;
     const metrics = this.metrics;

@@ -1,11 +1,11 @@
 {
   "source": "https://github.com/ghostty-org/ghostty/releases/download/tip/ghostty-vt.wasm",
-  "resolvedUrl": "https://release-assets.githubusercontent.com/github-production-release-asset/475553026/421e136c-3c4b-4685-b69c-3dee4b2bbbea",
-  "fetchedAt": "2026-08-25T16:44:31.053Z",
-  "sha256": "b3a643550f2390fb90b541ec9229c65963fb0bdb9af40648059477bfa2cb79f8",
-  "size": 981300,
+  "resolvedUrl": "https://release-assets.githubusercontent.com/github-production-release-asset/475553026/533427a7-3e87-40bc-8375-890dd8bc5c56",
+  "fetchedAt": "2026-10-27T20:17:13.102Z",
+  "sha256": "e40fe5d53319c4d9ab9283802e2844ded9ca86eba52894f865fc67a849620166",
+  "size": 1189912,
   "ghosttyVersion": "0.1.0-dev",
-  "ghosttyCommit": null,
+  "ghosttyCommit": "919dca5c848d43a489a4cb2e1feade016f0fa2db",
   "abiSchema": 1,
   "abi": {
     "target": "wasm32",

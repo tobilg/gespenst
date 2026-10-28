@@ -6,21 +6,31 @@ type DcsHandler = (data: string, params: Params) => boolean | Promise<boolean>;
 type EscHandler = () => boolean | Promise<boolean>;
 type OscHandler = (data: string) => boolean | Promise<boolean>;
 
+const ESC = 0x1b;
+const BEL = 0x07;
+const BACKSLASH = 0x5c;
+const MAX_PENDING_BYTES = 10 * 1024 * 1024;
+const NO_BYTES = new Uint8Array(0);
+
 export class ParserApi implements IParser {
   private readonly csi = new Map<string, CsiHandler[]>();
   private readonly dcs = new Map<string, DcsHandler[]>();
   private readonly esc = new Map<string, EscHandler[]>();
   private readonly osc = new Map<number, OscHandler[]>();
-  private pending = '';
+  /** Final bytes with a registered CSI handler, so other CSI sequences skip parameter parsing. */
+  private readonly csiFinals = new Set<number>();
+  private pending: Uint8Array = NO_BYTES;
   private readonly decoder = new TextDecoder();
-  private decoderStreaming = false;
 
   get active(): boolean {
     return this.csi.size + this.dcs.size + this.esc.size + this.osc.size > 0;
   }
 
   registerCsiHandler(id: IFunctionIdentifier, callback: CsiHandler): IDisposable {
-    return register(this.csi, identifier(id), callback);
+    return register(this.csi, identifier(id), callback, () => {
+      this.csiFinals.clear();
+      for (const key of this.csi.keys()) this.csiFinals.add(key.charCodeAt(key.length - 1));
+    });
   }
 
   registerDcsHandler(id: IFunctionIdentifier, callback: DcsHandler): IDisposable {
@@ -36,42 +46,40 @@ export class ParserApi implements IParser {
     return register(this.osc, ident, callback);
   }
 
-  async process(data: string | Uint8Array): Promise<string | Uint8Array> {
+  /**
+   * Removes the sequences a registered handler consumes. Returns `data` itself when nothing was
+   * removed or held back, and keeps an incomplete trailing sequence for the next call.
+   */
+  async process(data: Uint8Array): Promise<Uint8Array> {
     if (!this.active) return data;
-    if (
-      !this.decoderStreaming &&
-      this.pending.length === 0 &&
-      data instanceof Uint8Array &&
-      !containsEscape(data)
-    )
-      return data;
-    const hadPending = this.pending.length > 0;
-    if (data instanceof Uint8Array) this.decoderStreaming = true;
-    const input =
-      this.pending +
-      (typeof data === 'string' ? data : this.decoder.decode(data, { stream: true }));
-    this.pending = '';
-    const output: string[] = [];
-    // Streaming UTF-8 decoding can retain an incomplete suffix, so byte input must keep the
-    // decoded output path even when no registered handler consumes a control sequence.
-    let changed = hadPending || typeof data !== 'string';
+    let input = data;
+    if (this.pending.byteLength > 0) {
+      input = new Uint8Array(this.pending.byteLength + data.byteLength);
+      input.set(this.pending);
+      input.set(data, this.pending.byteLength);
+      this.pending = NO_BYTES;
+    }
+    const parts: Uint8Array[] = [];
+    let changed = input !== data;
+    // Start of the input not yet copied to `parts`.
+    let kept = 0;
     let offset = 0;
     while (offset < input.length) {
-      const start = input.indexOf('\x1b', offset);
-      if (start === -1) {
-        output.push(input.slice(offset));
-        break;
-      }
-      output.push(input.slice(offset, start));
-      const parsed = parseSequence(input, start);
+      const start = input.indexOf(ESC, offset);
+      if (start === -1) break;
+      const parsed = this.parseSequence(input, start);
       if (!parsed) {
-        this.pending = input.slice(start);
-        changed = true;
-        if (this.pending.length > 10 * 1024 * 1024)
+        if (input.length - start > MAX_PENDING_BYTES)
           throw new Error('Custom parser sequence exceeded 10 MiB');
+        this.pending = input.slice(start);
+        parts.push(input.subarray(kept, start));
+        kept = input.length;
+        changed = true;
         break;
       }
-      let handled = false;
+      offset = parsed.end;
+      if (parsed.kind === 'skip') continue;
+      let handled: boolean;
       if (parsed.kind === 'csi') {
         const result = invoke(this.csi.get(parsed.key), parsed.params);
         handled = typeof result === 'boolean' ? result : await result;
@@ -85,75 +93,141 @@ export class ParserApi implements IParser {
         const result = invoke(this.esc.get(parsed.key));
         handled = typeof result === 'boolean' ? result : await result;
       }
-      if (handled) changed = true;
-      else output.push(input.slice(start, parsed.end));
-      offset = parsed.end;
+      if (!handled) continue;
+      parts.push(input.subarray(kept, start));
+      kept = parsed.end;
+      changed = true;
     }
-    return changed ? output.join('') : data;
+    if (!changed) return data;
+    if (kept < input.length) parts.push(input.subarray(kept));
+    return concatBytes(parts);
+  }
+
+  /** Parses the sequence at `start`, or returns `null` when it is incomplete. */
+  private parseSequence(input: Uint8Array, start: number): ParsedSequence | null {
+    const introducer = input[start + 1];
+    if (introducer === undefined) return null;
+    if (introducer === 0x5d) {
+      const terminator = oscTerminator(input, start + 2);
+      if (terminator === -1) return null;
+      const end = terminator + (input[terminator] === BEL ? 1 : 2);
+      if (this.osc.size === 0) return { kind: 'skip', end };
+      const separator = input.indexOf(0x3b, start + 2);
+      const hasData = separator !== -1 && separator < terminator;
+      const ident = Number.parseInt(ascii(input, start + 2, hasData ? separator : terminator), 10);
+      return {
+        kind: 'osc',
+        ident: Number.isFinite(ident) ? ident : 0,
+        data: hasData ? this.decoder.decode(input.subarray(separator + 1, terminator)) : '',
+        end,
+      };
+    }
+    if (introducer === 0x5b) {
+      const final = findFinal(input, start + 2);
+      if (final === -1) return null;
+      if (!this.csiFinals.has(input[final] as number)) return { kind: 'skip', end: final + 1 };
+      const simple = simpleParams(input, start + 2, final);
+      if (simple) {
+        const key = String.fromCharCode(input[final] as number);
+        if (!this.csi.has(key)) return { kind: 'skip', end: final + 1 };
+        return { kind: 'csi', key, params: simple, end: final + 1 };
+      }
+      const parts = splitHeader(ascii(input, start + 2, final));
+      const key = parts.prefix + parts.intermediates + String.fromCharCode(input[final] as number);
+      if (!this.csi.has(key)) return { kind: 'skip', end: final + 1 };
+      return { kind: 'csi', key, params: parseParams(parts.params), end: final + 1 };
+    }
+    if (introducer === 0x50) {
+      const final = findFinal(input, start + 2);
+      if (final === -1) return null;
+      const st = stringTerminator(input, final + 1);
+      if (st === -1) return null;
+      if (this.dcs.size === 0) return { kind: 'skip', end: st + 2 };
+      const parts = splitHeader(ascii(input, start + 2, final));
+      return {
+        kind: 'dcs',
+        key: parts.prefix + parts.intermediates + String.fromCharCode(input[final] as number),
+        params: parseParams(parts.params),
+        data: this.decoder.decode(input.subarray(final + 1, st)),
+        end: st + 2,
+      };
+    }
+    let final = start + 1;
+    while (
+      final < input.length &&
+      (input[final] as number) >= 0x20 &&
+      (input[final] as number) <= 0x2f
+    )
+      final += 1;
+    if (final >= input.length) return null;
+    if (this.esc.size === 0) return { kind: 'skip', end: final + 1 };
+    return { kind: 'esc', key: ascii(input, start + 1, final + 1), end: final + 1 };
   }
 }
 
 type ParsedSequence =
+  | { kind: 'skip'; end: number }
   | { kind: 'csi'; key: string; params: Params; end: number }
   | { kind: 'dcs'; key: string; params: Params; data: string; end: number }
   | { kind: 'osc'; ident: number; data: string; end: number }
   | { kind: 'esc'; key: string; end: number };
 
-function parseSequence(input: string, start: number): ParsedSequence | null {
-  const introducer = input[start + 1];
-  if (introducer === undefined) return null;
-  if (introducer === ']') {
-    const bel = input.indexOf('\x07', start + 2);
-    const st = input.indexOf('\x1b\\', start + 2);
-    const terminator = bel === -1 ? st : st === -1 ? bel : Math.min(bel, st);
-    if (terminator === -1) return null;
-    const separator = input.indexOf(';', start + 2);
-    const identEnd = separator === -1 || separator > terminator ? terminator : separator;
-    const ident = Number.parseInt(input.slice(start + 2, identEnd), 10);
-    return {
-      kind: 'osc',
-      ident: Number.isFinite(ident) ? ident : 0,
-      data:
-        separator === -1 || separator > terminator ? '' : input.slice(separator + 1, terminator),
-      end: terminator + (input[terminator] === '\x07' ? 1 : 2),
-    };
-  }
-  if (introducer === '[') {
-    const final = findFinal(input, start + 2);
-    if (final === -1) return null;
-    const header = input.slice(start + 2, final);
-    const parts = splitHeader(header);
-    return {
-      kind: 'csi',
-      key: parts.prefix + parts.intermediates + input[final],
-      params: parseParams(parts.params),
-      end: final + 1,
-    };
-  }
-  if (introducer === 'P') {
-    const final = findFinal(input, start + 2);
-    if (final === -1) return null;
-    const st = input.indexOf('\x1b\\', final + 1);
-    if (st === -1) return null;
-    const parts = splitHeader(input.slice(start + 2, final));
-    return {
-      kind: 'dcs',
-      key: parts.prefix + parts.intermediates + input[final],
-      params: parseParams(parts.params),
-      data: input.slice(final + 1, st),
-      end: st + 2,
-    };
-  }
-  let final = start + 1;
-  while (final < input.length && input.charCodeAt(final) >= 0x20 && input.charCodeAt(final) <= 0x2f)
-    final += 1;
-  if (final >= input.length) return null;
-  return { kind: 'esc', key: input.slice(start + 1, final + 1), end: final + 1 };
+/** Index of the BEL or `ESC \` that ends an OSC payload starting at `from`, or -1. */
+function oscTerminator(input: Uint8Array, from: number): number {
+  const bel = input.indexOf(BEL, from);
+  const st = stringTerminator(input, from);
+  return bel === -1 ? st : st === -1 ? bel : Math.min(bel, st);
 }
 
-function findFinal(input: string, start: number): number {
+/** Index of the first `ESC \` at or after `from`, or -1. */
+function stringTerminator(input: Uint8Array, from: number): number {
+  for (let index = input.indexOf(ESC, from); index !== -1; index = input.indexOf(ESC, index + 1)) {
+    if (input[index + 1] === BACKSLASH) return index;
+  }
+  return -1;
+}
+
+/**
+ * Parses a CSI header made only of digits and `;`, the common case for SGR and cursor movement,
+ * without building strings. Returns `null` for any other header.
+ */
+function simpleParams(input: Uint8Array, start: number, end: number): number[] | null {
+  const params: number[] = [];
+  let value = 0;
+  for (let index = start; index < end; index += 1) {
+    const code = input[index] as number;
+    if (code === 0x3b) {
+      params.push(value);
+      value = 0;
+    } else if (code >= 0x30 && code <= 0x39) value = value * 10 + code - 0x30;
+    else return null;
+  }
+  params.push(value);
+  return params;
+}
+
+/** Decodes a sequence header, which is ASCII by construction. */
+function ascii(input: Uint8Array, start: number, end: number): string {
+  let value = '';
+  for (let index = start; index < end; index += 1)
+    value += String.fromCharCode(input[index] as number);
+  return value;
+}
+
+function concatBytes(parts: readonly Uint8Array[]): Uint8Array {
+  if (parts.length === 1) return parts[0] as Uint8Array;
+  const output = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.byteLength;
+  }
+  return output;
+}
+
+function findFinal(input: Uint8Array, start: number): number {
   for (let index = start; index < input.length; index += 1) {
-    const code = input.charCodeAt(index);
+    const code = input[index] as number;
     if (code >= 0x40 && code <= 0x7e) return index;
   }
   return -1;
@@ -197,15 +271,19 @@ function identifier(id: IFunctionIdentifier): string {
   return (id.prefix ?? '') + (id.intermediates ?? '') + id.final;
 }
 
-function register<K, H>(map: Map<K, H[]>, key: K, handler: H): IDisposable {
+function register<K, H>(map: Map<K, H[]>, key: K, handler: H, changed?: () => void): IDisposable {
   const handlers = map.get(key) ?? [];
   handlers.push(handler);
   map.set(key, handlers);
+  changed?.();
   return {
     dispose() {
       const index = handlers.indexOf(handler);
       if (index !== -1) handlers.splice(index, 1);
-      if (handlers.length === 0) map.delete(key);
+      if (handlers.length === 0 && map.get(key) === handlers) {
+        map.delete(key);
+        changed?.();
+      }
     },
   };
 }
@@ -236,10 +314,5 @@ async function continueInvocation<Args extends readonly unknown[]>(
   for (let current = index; current >= 0; current -= 1) {
     if (await handlers[current]?.(...args)) return true;
   }
-  return false;
-}
-
-function containsEscape(data: Uint8Array): boolean {
-  for (const value of data) if (value === 0x1b) return true;
   return false;
 }

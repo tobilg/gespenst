@@ -1,27 +1,35 @@
+import type { IBuffer } from '@xterm/xterm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Terminal, toXtermTheme, XtermCompatibilityError } from '../../../xterm/src';
-import { createTerminal, type GespenstTerminal, type TerminalBufferSnapshot } from '../../src';
+import {
+  type GespenstXtermRuntimeOptions,
+  Terminal,
+  toXtermTheme,
+  XtermCompatibilityError,
+} from '../../../xterm/src';
+import { createTerminal, type GespenstTerminal } from '../../src';
+import {
+  XTERM_COMPATIBILITY_BRIDGE,
+  type XtermBufferSource,
+  type XtermCompatibilityBridge,
+} from '../../src/internal/xterm-compatibility.js';
 
 const nativeTerminals: GespenstTerminal[] = [];
 const compatibleTerminals: Terminal[] = [];
-const compatibilityBridgeKey = Symbol.for('@gespenst/core/xterm-compatibility');
 
-interface CompatibilityBridge {
-  writeAsync(data: Uint8Array, owned: boolean): Promise<unknown>;
+function bufferSource(native: GespenstTerminal): XtermBufferSource {
+  const source = (native as unknown as Record<symbol, XtermCompatibilityBridge | undefined>)[
+    XTERM_COMPATIBILITY_BRIDGE
+  ]?.buffer;
+  if (!source) throw new Error('Core buffer source is unavailable');
+  return source;
 }
 
-function compatibilityBridge(native: GespenstTerminal): CompatibilityBridge {
-  const bridge = (native as unknown as Record<symbol, CompatibilityBridge | undefined>)[
-    compatibilityBridgeKey
-  ];
-  if (!bridge) throw new Error('Core compatibility bridge is unavailable');
-  return bridge;
-}
-
-function disableCompatibilityBridge(native: GespenstTerminal): void {
-  delete (native as unknown as Record<symbol, CompatibilityBridge | undefined>)[
-    compatibilityBridgeKey
-  ];
+/** Every retained row of `buffer` as trimmed text. */
+function lines(buffer: IBuffer): string[] {
+  return Array.from(
+    { length: buffer.length },
+    (_, y) => buffer.getLine(y)?.translateToString(true) ?? '<missing>'
+  );
 }
 
 afterEach(() => {
@@ -97,7 +105,7 @@ describe('@gespenst/xterm', () => {
     terminal.open(host());
     await terminal.ready;
     const native = await terminal.native;
-    const writeAsync = vi.spyOn(compatibilityBridge(native), 'writeAsync');
+    const write = vi.spyOn(bufferSource(native), 'write');
     const callbacks: number[] = [];
 
     terminal.write('one', () => callbacks.push(1));
@@ -109,7 +117,7 @@ describe('@gespenst/xterm', () => {
       })
     );
 
-    expect(writeAsync).toHaveBeenCalledOnce();
+    expect(write).toHaveBeenCalledOnce();
     expect(callbacks).toEqual([1, 2, 3]);
     expect(terminal.buffer.active.getLine(0)?.translateToString(true)).toBe('one two three');
   });
@@ -225,70 +233,167 @@ describe('@gespenst/xterm', () => {
     expect(addonDispose).toHaveBeenCalledOnce();
   });
 
-  it('shifts and disposes markers as retained rows are trimmed', async () => {
-    const terminal = new Terminal({
-      cols: 8,
-      rows: 2,
-      scrollback: 1,
-      allowProposedApi: true,
-    });
+  it('shifts and disposes markers as retained rows are pruned', async () => {
+    // Wide rows make Ghostty's pages small, so history is pruned a page at a time.
+    const terminal = new Terminal({ cols: 300, rows: 4, scrollback: 300, allowProposedApi: true });
     compatibleTerminals.push(terminal);
     terminal.open(host());
     await terminal.ready;
-    const native = await terminal.native;
-    disableCompatibilityBridge(native);
-    let snapshot = bufferSnapshot(['a', 'b', 'c'], 1);
-    vi.spyOn(native, 'readBuffer').mockImplementation(async () => snapshot);
-    await new Promise<void>((resolve) => terminal.write('seed', resolve));
+    let next = 0;
+    const output = (count: number) =>
+      new Promise<void>((resolve) =>
+        terminal.write(Array.from({ length: count }, () => `\r\nline ${next++}`).join(''), resolve)
+      );
+    // Start past the first pruned page, so the marker moves before its own page is pruned.
+    await output(1000);
     const marker = terminal.registerMarker();
+    const marked = terminal.buffer.active.getLine(marker.line)?.translateToString(true);
     const disposed = vi.fn();
     marker.onDispose(disposed);
 
-    snapshot = bufferSnapshot(['b', 'c', 'd'], 2);
-    await new Promise<void>((resolve) => terminal.write('x', resolve));
-    expect(marker.line).toBe(1);
-    snapshot = bufferSnapshot(['c', 'd', 'e'], 3);
-    await new Promise<void>((resolve) => terminal.write('x', resolve));
-    expect(marker.line).toBe(0);
-    expect(marker.isDisposed).toBe(false);
-    snapshot = bufferSnapshot(['d', 'e', 'f'], 4);
-    await new Promise<void>((resolve) => terminal.write('x', resolve));
+    let shifted = false;
+    while (!marker.isDisposed && next < 10_000) {
+      const before = marker.line;
+      await output(37);
+      if (marker.isDisposed) break;
+      shifted ||= marker.line < before;
+      expect(terminal.buffer.active.getLine(marker.line)?.translateToString(true)).toBe(marked);
+    }
+    expect(shifted).toBe(true);
     expect(marker.line).toBe(-1);
     expect(disposed).toHaveBeenCalledOnce();
   });
 
-  it('preserves markers until a non-overlapping viewport is resolved by a full read', async () => {
-    const terminal = new Terminal({
-      cols: 8,
-      rows: 2,
-      scrollback: 4,
-      allowProposedApi: true,
-    });
+  it('keeps normal-buffer markers and rows across a full-screen app', async () => {
+    const terminal = new Terminal({ cols: 20, rows: 3, scrollback: 50, allowProposedApi: true });
+    compatibleTerminals.push(terminal);
+    terminal.open(host());
+    await terminal.ready;
+    const write = (data: string) => new Promise<void>((resolve) => terminal.write(data, resolve));
+    await write('one\r\ntwo\r\nthree\r\nfour');
+    const marker = terminal.registerMarker(-1);
+    const normal = lines(terminal.buffer.normal);
+
+    await write('\x1b[?1049h\x1b[Hfull screen');
+    expect(terminal.buffer.active.type).toBe('alternate');
+    expect(terminal.buffer.active.getLine(0)?.translateToString(true)).toBe('full screen');
+    expect(lines(terminal.buffer.normal)).toEqual(normal);
+    expect(terminal.markers).toEqual([]);
+
+    await write('\x1b[?1049l');
+    expect(terminal.buffer.active.type).toBe('normal');
+    expect(lines(terminal.buffer.active)).toEqual(normal);
+    expect(lines(terminal.buffer.alternate)).toEqual(['', '', '']);
+    expect(marker.isDisposed).toBe(false);
+    expect(terminal.buffer.active.getLine(marker.line)?.translateToString(true)).toBe('three');
+  });
+
+  it('mirrors native reads after streaming output and shows native writes', async () => {
+    const terminal = new Terminal({ cols: 40, rows: 6, scrollback: 100 });
     compatibleTerminals.push(terminal);
     terminal.open(host());
     await terminal.ready;
     const native = await terminal.native;
-    disableCompatibilityBridge(native);
-    const initial = bufferSnapshot(['a', 'b', 'c', 'd', 'e', 'f'], 1);
-    const partial = bufferSnapshot(['g', 'h'], 2, 4, 6);
-    const complete = bufferSnapshot(['c', 'd', 'e', 'f', 'g', 'h'], 2);
-    let jumped = false;
-    const readBuffer = vi.spyOn(native, 'readBuffer').mockImplementation(async (range) => {
-      if (!jumped) return initial;
-      return range ? complete : partial;
+    for (let chunk = 0; chunk < 20; chunk += 1) {
+      terminal.write(
+        `\x1b[3${chunk % 8}mchunk ${chunk}\x1b[0m ` +
+          Array.from({ length: 9 }, (_, line) => `${chunk}.${line} 😀 e\u0301`).join('\r\n') +
+          '\r\n'
+      );
+    }
+    await new Promise<void>((resolve) => terminal.write('', resolve));
+    const snapshot = await native.readBuffer({ start: 0, end: terminal.buffer.active.length });
+    expect(lines(terminal.buffer.active)).toEqual(snapshot.rows.map((row) => row.text.trimEnd()));
+
+    native.write('\r\nfrom native');
+    const last = terminal.buffer.active.length - 1;
+    expect(terminal.buffer.active.getLine(last)?.translateToString(true)).toBe('from native');
+  });
+
+  it('parses before write callbacks run and paints afterwards', async () => {
+    const terminal = new Terminal({ cols: 20, rows: 3 });
+    compatibleTerminals.push(terminal);
+    terminal.open(host());
+    await terminal.ready;
+    await waitFrames(2);
+    const events: string[] = [];
+    terminal.onRender(() => events.push('render'));
+    await new Promise<void>((resolve) =>
+      terminal.write('ordered', () => {
+        events.push(`callback:${terminal.buffer.active.getLine(0)?.translateToString(true)}`);
+        resolve();
+      })
+    );
+    await waitFrames(2);
+    expect(events).toEqual(['callback:ordered', 'render']);
+  });
+
+  it('rejects worker execution, which would make buffer reads asynchronous', () => {
+    for (const worker of ['dedicated', 'shared'] as const) {
+      expect(() => new Terminal({ gespenst: { worker } as GespenstXtermRuntimeOptions })).toThrow(
+        XtermCompatibilityError
+      );
+    }
+    const terminal = new Terminal({
+      gespenst: { worker: false } as GespenstXtermRuntimeOptions,
     });
-    await new Promise<void>((resolve) => terminal.write('seed', resolve));
-    const marker = terminal.registerMarker();
-    const disposed = vi.fn();
-    marker.onDispose(disposed);
+    compatibleTerminals.push(terminal);
+  });
 
-    jumped = true;
-    await new Promise<void>((resolve) => terminal.write('jump', resolve));
+  it('reports a scroll that is painted in the same frame as a scrolling write', async () => {
+    // The main-thread backend paints the write and the scroll below in one animation frame.
+    const terminal = new Terminal({ cols: 8, rows: 2, scrollback: 10 });
+    compatibleTerminals.push(terminal);
+    terminal.open(host());
+    await terminal.ready;
+    const positions: number[] = [];
+    const viewports: number[] = [];
+    terminal.onScroll((position) => {
+      positions.push(position);
+      viewports.push(terminal.buffer.active.viewportY);
+    });
 
-    expect(readBuffer).toHaveBeenCalledWith({ start: 0, end: 6 });
-    expect(marker.line).toBe(0);
-    expect(marker.isDisposed).toBe(false);
-    expect(disposed).not.toHaveBeenCalled();
+    await new Promise<void>((resolve) => terminal.write('one\r\ntwo\r\nthree', resolve));
+    expect(positions).toEqual([1]);
+
+    const top = new Promise<void>((resolve) => {
+      const subscription = terminal.onScroll(() => {
+        subscription.dispose();
+        resolve();
+      });
+    });
+    terminal.scrollToTop();
+    await top;
+    expect(positions).toEqual([1, 0]);
+    expect(viewports).toEqual(positions);
+  });
+
+  it('exposes rows changed outside the viewport when writes complete', async () => {
+    const terminal = new Terminal({ cols: 20, rows: 4, scrollback: 10 });
+    compatibleTerminals.push(terminal);
+    terminal.open(host());
+    await terminal.ready;
+    const write = (data: string) => new Promise<void>((resolve) => terminal.write(data, resolve));
+    const line = (y: number) => terminal.buffer.active.getLine(y)?.translateToString(true);
+
+    // Ghostty moves a cleared prompt screen into history within the same write.
+    await write('out1\r\nout2\r\n\x1b]133;A\x07$ \x1b]133;B\x07\x1b[H\x1b[2J');
+    expect([line(0), line(1), line(2)]).toEqual(['out1', 'out2', '$']);
+
+    await write('\x1b[1;1Htop\x1b[S');
+    expect(line(3)).toBe('top');
+
+    const scrolled = new Promise<void>((resolve) => {
+      const subscription = terminal.onScroll(() => {
+        subscription.dispose();
+        resolve();
+      });
+    });
+    terminal.scrollLines(-3);
+    await scrolled;
+    const active = terminal.buffer.active.baseY + 1;
+    await write('\x1b[2;1HUP');
+    expect(line(active)).toBe('UP');
   });
 
   it('positions decorations relative to the current viewport', async () => {
@@ -458,35 +563,6 @@ async function waitFrames(count: number): Promise<void> {
   for (let index = 0; index < count; index += 1) {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   }
-}
-
-function bufferSnapshot(
-  ids: readonly string[],
-  revision: number,
-  start = 0,
-  totalRows = ids.length
-): TerminalBufferSnapshot {
-  return {
-    state: {
-      screen: 'normal',
-      totalRows,
-      scrollbackRows: 1,
-      viewportY: 1,
-      viewportLength: 2,
-      cursorX: 0,
-      cursorY: 1,
-      revision,
-    },
-    rows: ids.map((id, index) => ({
-      index: start + index,
-      id,
-      text: id,
-      cells: [],
-      wrapped: false,
-      wrapContinuation: false,
-      selection: null,
-    })),
-  };
 }
 
 describe('native themes', () => {
