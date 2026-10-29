@@ -383,6 +383,27 @@ describe('browser terminal', () => {
     expect(input).toEqual(['日本']);
   });
 
+  it('keeps text input in order with keys typed before it', async () => {
+    const terminal = await createTerminal({
+      container: container(),
+      worker: true,
+      renderer: 'canvas2d',
+    });
+    terminals.push(terminal);
+    const input: string[] = [];
+    terminal.on('input', ({ data }) => input.push(new TextDecoder().decode(data)));
+    const textarea = terminal.element.querySelector('textarea');
+    if (!textarea) throw new Error('Expected terminal textarea');
+
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', code: 'KeyA', bubbles: true }));
+    textarea.value = '日本';
+    textarea.dispatchEvent(new InputEvent('input', { bubbles: true, data: '日本' }));
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', code: 'KeyB', bubbles: true }));
+    await terminal.writeAsync('');
+
+    expect(input.join('')).toBe('a日本b');
+  });
+
   it('encodes Return from an iOS-style code-less keydown', async () => {
     const terminal = await createTerminal({
       container: container(),
