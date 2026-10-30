@@ -1135,11 +1135,8 @@ export class GespenstTerminal implements BrowserTerminal {
   /** Sends composed text toward the PTY. */
   sendText(data: string): void {
     this.ensureActive();
-    // Composed text is already the exact UTF-8 payload expected by the PTY. Keep it on the main
-    // thread instead of paying a worker round trip through Ghostty's identity text encoder.
-    for (const listener of this.compatibilityInputListeners) listener(data, 'text');
-    if (this.events.hasListeners('input'))
-      this.events.emit('input', { data: this.encoder.encode(data), source: 'text' });
+    // Text shares the backend's queue with keys, so it cannot overtake keys still in the worker.
+    this.backend.text(data);
   }
   /** Sends text through bracketed-paste handling when enabled. */
   paste(data: string): void {
